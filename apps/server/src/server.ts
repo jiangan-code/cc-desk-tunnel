@@ -1,4 +1,4 @@
-import { randomUUID, createHash, timingSafeEqual } from 'node:crypto';
+import { randomBytes, randomUUID, createHash, timingSafeEqual } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
@@ -16,6 +16,8 @@ import {
   commandSchema,
   MAX_FRAME_BYTES,
   PROTOCOL_VERSION,
+  ResumeLog,
+  resumeAckSchema,
   tunnelAttachSchema,
   tunnelCredentialsSchema,
   terminalControlSchema,
@@ -60,6 +62,10 @@ type Peer = {
   registering: boolean;
   subscriptions: Set<string>;
   responses: Map<string, { command: string; response: Promise<ServerMessage> }>;
+  // A connection whose client reconnects by itself outlives a network drop for a grace period: its frames are
+  // numbered and held until acknowledged, and its runs, terminal and tunnel wait for it (`detached`).
+  resume?: { key: string; log: ResumeLog };
+  detached?: ReturnType<typeof setTimeout>;
 };
 export type Run = {
   id: string;
@@ -93,6 +99,8 @@ export type ServerOptions = {
   clientDir?: string;
   // Following the published releases; absent, the service neither looks for nor installs newer versions.
   updates?: Omit<UpdateOptions, 'clientDir'>;
+  // How long a dropped resumable connection is kept for its client to come back.
+  resumeGraceMs?: number;
 };
 
 export function createProxyServer(options: ServerOptions) {
@@ -136,6 +144,7 @@ export function createProxyServer(options: ServerOptions) {
       )
     : undefined;
   const throttle = new Throttle();
+  const graceMs = options.resumeGraceMs ?? 180000;
   // Behind the reverse proxy every socket comes from the proxy itself; it passes the client on in X-Real-IP.
   const addressOf = (request: IncomingMessage) =>
     (options.reverseProxy && [request.headers['x-real-ip']].flat()[0]) ||
@@ -201,7 +210,75 @@ export function createProxyServer(options: ServerOptions) {
   });
 
   function send(peer: Peer, message: ServerMessage) {
-    if (peer.socket.readyState === WebSocket.OPEN) peer.socket.send(JSON.stringify(message));
+    const frame = JSON.stringify(message);
+    // A dropped connection collects what it misses, up to a limit; past it, it is given up.
+    if (peer.resume && !peer.resume.log.record(frame) && peer.detached) {
+      expire(peer, 'too much output waiting for it');
+      return;
+    }
+    if (peer.socket.readyState === WebSocket.OPEN) peer.socket.send(frame);
+  }
+  function detach(peer: Peer) {
+    console.log(
+      `Connection ${peer.id.slice(0, 8)} dropped; kept ${graceMs / 1000}s for its client to reconnect`,
+    );
+    peer.detached = setTimeout(() => expire(peer, `not back within ${graceMs / 1000}s`), graceMs);
+    if (terminal?.owner === peer) terminal.process?.hold(true);
+    if (peer.tunnel instanceof RelayTunnel) peer.tunnel.recheck();
+  }
+  function expire(peer: Peer, why: string) {
+    if (!peer.detached) return;
+    clearTimeout(peer.detached);
+    peer.detached = undefined;
+    peer.resume = undefined;
+    const owned = [...runs.values()].filter((run) => run.owner === peer).length;
+    console.log(`Connection ${peer.id.slice(0, 8)} given up: ${why}; runs ended with it: ${owned}`);
+    release(peer);
+  }
+  // Hands a dropped connection, with its runs, terminal and tunnel, to the new socket, then replays what the client
+  // missed. The client replays its own side after `resumed`.
+  function resume(
+    peer: Peer,
+    { connectionId, key, received }: { connectionId: string; key: string; received: number },
+  ) {
+    const target = [...peers].find(
+      (candidate) => candidate.id === connectionId && candidate.resume,
+    );
+    const held = target?.resume;
+    const matches =
+      !!held &&
+      timingSafeEqual(
+        createHash('sha256').update(held.key).digest(),
+        createHash('sha256').update(key).digest(),
+      );
+    const frames = matches ? held.log.since(received) : null;
+    if (!target || !held || !frames) {
+      if (matches) expire(target!, 'its client lost track of the frames');
+      send(peer, {
+        type: 'connection.error',
+        code: 'resume_failed',
+        message: '网络中断太久或服务已重启，原来的运行已结束，请重新连接。',
+      });
+      peer.socket.close(4004, 'Resume failed');
+      return false;
+    }
+    clearTimeout(target.detached);
+    target.detached = undefined;
+    const previous = target.socket;
+    target.socket = peer.socket;
+    target.address = peer.address;
+    peers.delete(peer);
+    // Its close handler sees that it no longer belongs to the connection.
+    previous.terminate();
+    held.log.confirm(received);
+    peer.socket.send(
+      JSON.stringify({ type: 'resumed', connectionId, received: held.log.received }),
+    );
+    for (const frame of frames) peer.socket.send(frame);
+    if (terminal?.owner === target) terminal.process?.hold(false);
+    if (target.tunnel instanceof RelayTunnel) target.tunnel.recheck();
+    console.log(`Connection ${connectionId.slice(0, 8)} resumed; ${frames.length} frames replayed`);
+    return target;
   }
   function broadcast(message: ServerMessage, sessionId?: string) {
     for (const peer of peers) {
@@ -815,8 +892,9 @@ export function createProxyServer(options: ServerOptions) {
     releases.current
       ? (({ version, size, sha256 }) => ({ version, size, sha256 }))(releases.current)
       : undefined;
-  // The first frame must authenticate; a desktop client also asks for its Windows tunnel here.
-  function authenticate(peer: Peer, value: unknown) {
+  // The first frame must authenticate; a desktop client also asks for its Windows tunnel here. Returns the
+  // connection the socket now serves, which is another one when it resumed.
+  function authenticate(peer: Peer, value: unknown): Peer | false {
     const auth = authSchema.safeParse(value);
     // Only a wrong token counts against the address: an outdated client holding the right one is not guessing.
     const token = (value as { token?: unknown } | null)?.token;
@@ -839,7 +917,16 @@ export function createProxyServer(options: ServerOptions) {
       peer.socket.close(4002, 'Version mismatch');
       return false;
     }
+    if (auth.data.resume) return resume(peer, auth.data.resume);
     peer.authenticated = true;
+    // Only the relay can wait for its desktop: an frp tunnel ends with its frpc connection.
+    const key =
+      auth.data.resumable &&
+      auth.data.tunnel &&
+      auth.data.tunnelTransport === 'relay' &&
+      options.tunnel
+        ? randomBytes(32).toString('base64url')
+        : undefined;
     send(peer, {
       type: 'ready',
       protocolVersion: PROTOCOL_VERSION,
@@ -850,16 +937,29 @@ export function createProxyServer(options: ServerOptions) {
       update: updates?.state,
       client: installer(),
       sessions: store.list(),
+      ...(key && { resume: { key, graceMs } }),
     });
+    if (key)
+      peer.resume = {
+        key,
+        log: new ResumeLog((received) => {
+          if (peer.socket.readyState === WebSocket.OPEN)
+            peer.socket.send(JSON.stringify({ type: 'resume.ack', received }));
+        }),
+      };
     if (auth.data.tunnel && options.tunnel) {
-      if (tunnelOwner) {
+      // A device that dropped and is waiting to come back gives way to a new sign-in, which is most likely the same
+      // desktop started again. Its relay tunnel shares nothing with the new one, so neither waits for the other.
+      const stale = tunnelOwner?.detached ? tunnelOwner : undefined;
+      if (stale) expire(stale, 'a new connection took the device');
+      if (tunnelOwner && tunnelOwner !== stale) {
         send(peer, {
           type: 'connection.error',
           code: 'device_busy',
           message: '已有桌面设备连接或正在清理，请稍后重试。',
         });
         peer.socket.close(4003, 'Device busy');
-        return true;
+        return peer;
       }
       tunnelOwner = peer;
       const relay = auth.data.tunnelTransport === 'relay';
@@ -888,7 +988,7 @@ export function createProxyServer(options: ServerOptions) {
         tunnelTasks,
       );
     }
-    return true;
+    return peer;
   }
   // A relay connection signs in with the secret its desktop received over the control connection. A wrong secret
   // counts against the address like a wrong token.
@@ -996,6 +1096,7 @@ export function createProxyServer(options: ServerOptions) {
   // Whatever the connection owned ends with it; nothing is replayed for a later connection.
   function release(peer: Peer) {
     peers.delete(peer);
+    peer.resume?.log.stop();
     if (login?.owner === peer) login.process.cancel();
     if (terminal?.owner === peer) {
       const task = terminal.process?.close();
@@ -1020,7 +1121,8 @@ export function createProxyServer(options: ServerOptions) {
 
   wss.on('connection', (socket: WebSocket, address: string) => {
     void releases.refresh();
-    const peer: Peer = {
+    // Becomes the dropped connection when this socket resumes one.
+    let peer: Peer = {
       socket,
       id: randomUUID(),
       address,
@@ -1049,7 +1151,8 @@ export function createProxyServer(options: ServerOptions) {
     }, 15000);
     socket.on('error', () => socket.terminate());
     socket.on('message', (data, isBinary) => {
-      if (peer.relay) return;
+      // A socket whose connection was resumed elsewhere may still hold frames; the new socket replays them.
+      if (peer.relay || peer.socket !== socket) return;
       let value: unknown;
       try {
         if (isBinary) throw new Error('Binary frame');
@@ -1065,11 +1168,23 @@ export function createProxyServer(options: ServerOptions) {
       }
       if (!peer.authenticated) {
         const attach = tunnelAttachSchema.safeParse(value);
-        if (attach.success ? attachRelay(peer, attach.data) : authenticate(peer, value)) {
+        const next = attach.success
+          ? attachRelay(peer, attach.data) && peer
+          : authenticate(peer, value);
+        if (next) {
+          peer = next;
           clearTimeout(authTimer);
           throttle.leave(address);
         }
         return;
+      }
+      if (peer.resume) {
+        const ack = resumeAckSchema.safeParse(value);
+        if (ack.success) {
+          peer.resume.log.confirm(ack.data.received);
+          return;
+        }
+        peer.resume.log.receive();
       }
       const credentials = tunnelCredentialsSchema.safeParse(value);
       if (credentials.success) {
@@ -1096,6 +1211,13 @@ export function createProxyServer(options: ServerOptions) {
       clearTimeout(authTimer);
       clearInterval(heartbeat);
       if (!peer.authenticated && !peer.relay) throttle.leave(address);
+      // A resumed connection moved on to another socket.
+      if (peer.socket !== socket) return;
+      // Anything but a deliberate close from a client that can come back leaves the connection waiting for it.
+      if (peer.resume && !peer.detached && !closing && code !== 1000) {
+        detach(peer);
+        return;
+      }
       // Why a connection ended is the first thing needed when a run was cut short.
       const owned = [...runs.values()].filter((run) => run.owner === peer).length;
       if (peer.authenticated && !closing)
@@ -1129,6 +1251,7 @@ export function createProxyServer(options: ServerOptions) {
       login?.process.cancel();
       const terminalCleanup = terminal?.process?.close();
       for (const run of runs.values()) cancel(run, '服务停止，运行未重放。');
+      for (const peer of peers) clearTimeout(peer.detached);
       const cleanup = [...peers].map((peer) => peer.tunnel?.close());
       for (const peer of peers) peer.socket.terminate();
       await Promise.all([...tasks]);

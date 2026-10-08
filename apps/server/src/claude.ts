@@ -47,7 +47,9 @@ export function remotePrompt(projectPath: string, ssh: SshConnection, sessionId:
       'SSH uses a temporary identity and pinned host key. Never disclose or copy the private key.',
       'Each command has a separate Bash session. Keep long-running commands attached to a background native Bash task; ordinary child processes are stopped when the SSH channel closes. Do not daemonize them.',
       'After interruption, report unknown results and never automatically retry side effects.',
-      `Scheduled prompts are managed by the desktop. Edit its ${JSON.stringify(ssh.schedulesPath)} via SSH, using the JSON format documented in its 说明 field. Do not use cron on this host. Session ID: ${sessionId}.`,
+      ssh.schedulesPath
+        ? `Scheduled prompts are managed by the desktop. Edit its ${JSON.stringify(ssh.schedulesPath)} via SSH, using the JSON format documented in its 说明 field. Do not use cron on this host. Session ID: ${sessionId}.`
+        : 'This client runs no scheduled prompts. Do not use cron on this host for recurring work; tell the user it needs the desktop client.',
     ].join('\n');
   return [
     'The user and all their projects are on the connected Windows computer, NOT on this Linux host.',

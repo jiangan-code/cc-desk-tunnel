@@ -666,6 +666,12 @@ export function App() {
                 连接中断，等待恢复
               </div>
             )}
+            {connected && state.resuming && (
+              <div className="connection-banner" role="status">
+                <Unplug />
+                网络中断，正在重连；运行和终端在服务端继续
+              </div>
+            )}
             <Conversation
               session={selected}
               events={events}

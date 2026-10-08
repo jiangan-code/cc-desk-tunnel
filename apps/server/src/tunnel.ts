@@ -80,9 +80,19 @@ export function sshConfig(
   port: number,
   username: string,
   hostPublicKey: string,
+  platform = 'win32',
 ) {
   if (directory.includes('\n') || directory.includes('"'))
     throw new Error('Unsupported data directory');
+  // The Linux desktop is reached through the WSS relay, where an SSH handshake takes several round trips to the
+  // desktop: one connection carries every command, which then costs a channel instead (about 0.4 s instead of 1.5 s
+  // on a distant service). It ends with the tunnel's relay. The socket path must fit in sun_path.
+  const control = join(directory, 'cm');
+  const linux = platform === 'linux';
+  const multiplex =
+    linux && Buffer.byteLength(control) < 100
+      ? ['  ControlMaster auto', `  ControlPath "${control}"`, '  ControlPersist yes']
+      : [];
   return {
     knownHosts: `[127.0.0.1]:${port} ${hostPublicKey}\n`,
     config: [
@@ -95,7 +105,9 @@ export function sshConfig(
       '  IdentitiesOnly yes',
       '  BatchMode yes',
       '  StrictHostKeyChecking yes',
-      '  ConnectTimeout 5',
+      // Linux: long enough for a command issued during a reconnect to wait for the desktop.
+      `  ConnectTimeout ${linux ? 30 : 5}`,
+      ...multiplex,
       '  ServerAliveInterval 10',
       '  ServerAliveCountMax 2',
       '  ForwardAgent no',
@@ -186,6 +198,7 @@ export class WindowsTunnel {
       this.remotePort,
       credentials.username,
       credentials.hostPublicKey,
+      credentials.platform,
     );
     const configPath = join(this.directory, 'ssh_config');
     writeFileSync(join(this.directory, 'identity'), credentials.privateKey, { mode: 0o600 });

@@ -8,6 +8,7 @@ export function openConnection(url, token, { timeoutMs = 60000 } = {}) {
   const socket = new WebSocket(url, { maxPayload: MAX_FRAME_BYTES });
   const pending = new Map();
   const listeners = new Set();
+  const stateListeners = new Set();
   let ready = null;
   let failure = null;
   let resolveClosed;
@@ -32,6 +33,11 @@ export function openConnection(url, token, { timeoutMs = 60000 } = {}) {
     onTerminal(listener) {
       listeners.add(listener);
       return () => listeners.delete(listener);
+    },
+    // 'reconnecting' while the bridge takes the service connection back after a network drop, then 'connected'.
+    onState(listener) {
+      stateListeners.add(listener);
+      return () => stateListeners.delete(listener);
     },
     close() {
       socket.close();
@@ -76,6 +82,8 @@ export function openConnection(url, token, { timeoutMs = 60000 } = {}) {
         pending.delete(message.requestId);
         if (message.ok) request.resolve(message);
         else request.reject(new Error(message.message ?? message.code ?? '请求失败。'));
+      } else if (message.type === 'connection.state') {
+        for (const listener of stateListeners) listener(message.state);
       } else if (message.type.startsWith('terminal.')) {
         for (const listener of listeners) listener(message);
       }

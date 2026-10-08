@@ -191,6 +191,14 @@ async function run(directory, values) {
     ]);
     if (connection.ready.adapter !== 'claude-code')
       throw new Error('服务运行在离线模拟模式，没有原生终端。');
+    // A network drop pauses everything until the bridge has the connection back. Before the terminal is attached
+    // the status line says so; after, the window title does, as the screen belongs to Claude Code.
+    connection.onState((state) => {
+      const reconnecting = state === 'reconnecting';
+      if (!terminal) status(reconnecting ? '网络中断，正在重连 …' : '已重新连接 …');
+      else
+        process.stdout.write(`\x1b]2;${reconnecting ? 'ccdt：网络中断，正在重连…' : 'ccdt'}\x07`);
+    });
     const session = await chooseSession(connection, projectPath, values);
     abort.signal.throwIfAborted();
     clearStatus();
