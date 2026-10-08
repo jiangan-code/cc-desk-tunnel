@@ -463,6 +463,9 @@ export const terminalControlSchema = z.discriminatedUnion('type', [
     .strict(),
 ]);
 export type TerminalControl = z.infer<typeof terminalControlSchema>;
+// The secret that lets a client take back a connection the network dropped, and a count of frames.
+const resumeKey = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
+const frameCount = z.number().int().nonnegative();
 export const authSchema = z
   .object({
     type: z.literal('auth'),
@@ -474,7 +477,19 @@ export const authSchema = z
     // How the service reaches the desktop's SSH endpoint: through frp and its own port, or relayed over further WSS
     // connections the desktop opens to this service, which needs neither.
     tunnelTransport: z.enum(['frp', 'relay']).default('frp'),
+    // A client that reconnects by itself asks to keep its connection, with its runs, terminal and tunnel, through a
+    // network drop; the service then grants a key in `ready`.
+    resumable: z.boolean().default(false),
+    // Takes back such a connection; `received` counts the service frames that arrived before it dropped.
+    resume: z
+      .object({ connectionId: id, key: resumeKey, received: frameCount })
+      .strict()
+      .optional(),
   })
+  .strict();
+// How many frames of a resumable connection one side has received; sent now and then, so the other can let them go.
+export const resumeAckSchema = z
+  .object({ type: z.literal('resume.ack'), received: frameCount })
   .strict();
 // The per-connection secret that admits the desktop's relay connections.
 const relaySecret = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
@@ -498,6 +513,8 @@ export const serverMessageSchema = z.discriminatedUnion('type', [
     // The newest Windows installer the service holds, for clients that want to upgrade themselves.
     client: installerSchema.optional(),
     sessions: z.array(sessionSchema),
+    // Granted to a resumable connection: how long the service keeps it after it dropped.
+    resume: z.object({ key: resumeKey, graceMs: z.number().int().positive() }).optional(),
   }),
   z.object({
     type: z.literal('response'),
@@ -551,6 +568,11 @@ export const serverMessageSchema = z.discriminatedUnion('type', [
   }),
   z.object({ type: z.literal('tunnel.relay'), connectionId: id, secret: relaySecret }),
   z.object({ type: z.literal('tunnel.ready'), connectionId: id }),
+  z.object({ type: z.literal('resume.ack'), received: frameCount }),
+  // The answer to `auth.resume`, before the frames the client missed; `received` is what the service got.
+  z.object({ type: z.literal('resumed'), connectionId: id, received: frameCount }),
+  // From the local bridge to its own client only: the service connection is being re-established, or is back.
+  z.object({ type: z.literal('connection.state'), state: z.enum(['reconnecting', 'connected']) }),
 ]);
 export type ServerMessage = z.infer<typeof serverMessageSchema>;
 
@@ -571,3 +593,55 @@ export const tunnelCredentialsSchema = z
   })
   .strict();
 export type TunnelCredentials = z.infer<typeof tunnelCredentialsSchema>;
+
+// One side of a resumable connection. Frames sent after sign-in are numbered in order and kept until the other side
+// acknowledges them; after a reconnect each side replays what the other did not receive. WebSocket delivery is
+// ordered, so counting frames is enough.
+export class ResumeLog {
+  sent = 0;
+  received = 0;
+  private frames: string[] = [];
+  private size = 0;
+  private acknowledged = 0;
+  private timer?: ReturnType<typeof setTimeout>;
+  private acknowledge: (received: number) => void;
+  private limit: number;
+  constructor(acknowledge: (received: number) => void, limit = 16 * 1024 * 1024) {
+    this.acknowledge = acknowledge;
+    this.limit = limit;
+  }
+  // Keeps an outgoing frame; false once more is unacknowledged than the limit allows.
+  record(frame: string) {
+    this.sent++;
+    this.frames.push(frame);
+    this.size += frame.length;
+    return this.size <= this.limit;
+  }
+  // The other side has these; they need not be kept.
+  confirm(received: number) {
+    const drop = Math.min(received - (this.sent - this.frames.length), this.frames.length);
+    if (drop > 0) for (const frame of this.frames.splice(0, drop)) this.size -= frame.length;
+  }
+  // The frames after the first `received`, or null when they are not all held any more.
+  since(received: number) {
+    const first = this.sent - this.frames.length;
+    if (received < first || received > this.sent) return null;
+    return this.frames.slice(received - first);
+  }
+  // Counts an incoming frame; acknowledgments go out in batches.
+  receive() {
+    this.received++;
+    if (this.received - this.acknowledged >= 64) this.flush();
+    else this.timer ??= setTimeout(() => this.flush(), 1000);
+  }
+  flush() {
+    this.stop();
+    if (this.received === this.acknowledged) return;
+    this.acknowledged = this.received;
+    this.acknowledge(this.received);
+  }
+  stop() {
+    clearTimeout(this.timer);
+    this.timer = undefined;
+  }
+}

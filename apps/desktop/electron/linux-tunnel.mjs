@@ -32,6 +32,8 @@ export async function startLinuxTunnel(configuration, binaries, signal, onFailur
         ...(binaries.schedulesPath && { schedulesPath: binaries.schedulesPath }),
       },
       close,
+      // Fresh relay connections after the control connection was resumed.
+      reset: () => relay.reset(),
     };
   } catch (error) {
     await close();

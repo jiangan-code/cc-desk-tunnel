@@ -9,8 +9,9 @@ import type { TunnelOffer } from './tunnel.ts';
 
 // Relay connections the desktop may keep waiting; it keeps a couple so a command needs no new TLS handshake.
 const MAX_IDLE = 4;
-// An SSH connection that finds no relay connection in this time is dropped, and ssh reports a failed command.
-const WAIT_MS = 15000;
+// An SSH connection that finds no relay connection in this time is dropped, and ssh reports a failed command. It is
+// as long as ssh's own ConnectTimeout, so a command issued while the desktop reconnects waits for it.
+const WAIT_MS = 30000;
 
 // Reaches the desktop's SSH endpoint without frp: ssh connects to a loopback port here, and each of its TCP
 // connections is spliced to one WSS connection the desktop opened to this service and signed in with the
@@ -20,7 +21,7 @@ export class RelayTunnel extends WindowsTunnel {
   private listener?: Server;
   private idle: WebSocket[] = [];
   private waiting: { socket: Socket; timer: ReturnType<typeof setTimeout> }[] = [];
-  private active = new Set<Socket>();
+  private active = new Map<Socket, WebSocket>();
 
   override async start(): Promise<TunnelOffer> {
     mkdirSync(this.directory, { recursive: true, mode: 0o700 });
@@ -77,7 +78,7 @@ export class RelayTunnel extends WindowsTunnel {
   private splice(relay: WebSocket, socket: Socket) {
     relay.send(RELAY_BEGIN);
     const stream = createWebSocketStream(relay);
-    this.active.add(socket);
+    this.active.set(socket, relay);
     stream.on('error', () => socket.destroy());
     socket.on('error', () => stream.destroy());
     socket.once('close', () => {
@@ -88,13 +89,27 @@ export class RelayTunnel extends WindowsTunnel {
     stream.pipe(socket);
     socket.resume();
   }
+  // When the control connection dropped or came back. Waiting relay connections most likely went with the old
+  // network path, so they are let go and the desktop opens new ones; a busy one that no longer answers is cut, which
+  // ends its ssh connection instead of leaving the command hanging until the heartbeat notices.
+  recheck() {
+    for (const relay of this.idle) relay.terminate();
+    this.idle = [];
+    for (const relay of this.active.values()) {
+      if (relay.readyState !== WebSocket.OPEN) continue;
+      let answered = false;
+      relay.once('pong', () => (answered = true));
+      relay.ping();
+      setTimeout(() => answered || relay.terminate(), 5000).unref();
+    }
+  }
   override close() {
     if (!this.closePromise) {
       this.listener?.close();
       for (const relay of this.idle) relay.close();
       this.idle = [];
       for (const { socket } of this.waiting) socket.destroy();
-      for (const socket of this.active) socket.destroy();
+      for (const socket of this.active.keys()) socket.destroy();
     }
     return super.close();
   }

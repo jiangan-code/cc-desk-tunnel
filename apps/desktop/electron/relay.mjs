@@ -3,13 +3,20 @@ import { WebSocket, createWebSocketStream } from 'ws';
 import { RELAY_BEGIN } from '@cc-desk-tunnel/protocol';
 
 const SPARE = 2;
-const MAX_FAILURES = 5;
+const MAX_BACKOFF_MS = 5000;
 
 // The desktop side of the service's relay: keeps a few signed-in WSS connections waiting, and when the service
 // hands one an SSH connection, splices it to the local SSH endpoint and opens a replacement. `openSocket` returns an
 // open connection whose certificate has already been checked, so the secret goes nowhere else.
+//
+// Failed connections are retried with backoff for as long as the tunnel lives: during a network drop the control
+// connection is being resumed too, and the tunnel must still be there when it is back. Only a refused secret, which
+// means the service no longer knows this tunnel, ends it.
 export function startRelay({ connectionId, secret }, port, openSocket, onFailure) {
-  const sockets = new Set();
+  const waiting = new Set();
+  // Waiting connections let go by `reset`; their close is not a failure.
+  const discarded = new WeakSet();
+  let opening = 0;
   let closed = false;
   let failures = 0;
   let retryTimer;
@@ -18,40 +25,47 @@ export function startRelay({ connectionId, secret }, port, openSocket, onFailure
     close();
     onFailure(message);
   };
-  // Connections that never got as far as a hand-over count as failures; enough of them in a row end the tunnel.
-  const retry = () => {
+  function topUp() {
     if (closed || retryTimer) return;
-    if (++failures >= MAX_FAILURES) return fail('执行通道中继连接反复失败，请检查网络后重新连接。');
+    while (waiting.size + opening < SPARE) void open();
+  }
+  function retry() {
+    if (closed || retryTimer) return;
+    failures++;
     retryTimer = setTimeout(
       () => {
         retryTimer = undefined;
-        void open();
+        topUp();
       },
-      250 * 2 ** failures,
+      Math.min(250 * 2 ** failures, MAX_BACKOFF_MS),
     );
-  };
+  }
   async function open() {
+    opening++;
     let socket;
     try {
       socket = await openSocket();
     } catch {
       return retry();
+    } finally {
+      opening--;
     }
     if (closed) return socket.terminate();
-    sockets.add(socket);
+    failures = 0;
+    waiting.add(socket);
     let begun = false;
     socket.on('error', () => socket.terminate());
     socket.once('close', (code) => {
-      sockets.delete(socket);
-      if (begun || closed) return;
+      waiting.delete(socket);
+      if (begun || closed || discarded.has(socket)) return;
       if (code === 4001) fail('执行通道中继认证失败。');
       else if (code !== 4008) retry();
     });
     socket.once('message', (data, isBinary) => {
       if (isBinary || data.toString('utf8') !== RELAY_BEGIN) return socket.terminate();
       begun = true;
-      failures = 0;
-      void open();
+      waiting.delete(socket);
+      topUp();
       // The stream takes over the socket's messages from here, in the same tick, so no bytes are missed.
       const stream = createWebSocketStream(socket);
       const local = connect(port, '127.0.0.1');
@@ -66,11 +80,27 @@ export function startRelay({ connectionId, secret }, port, openSocket, onFailure
   function close() {
     closed = true;
     clearTimeout(retryTimer);
-    for (const socket of sockets) socket.terminate();
-    sockets.clear();
+    for (const socket of waiting) socket.terminate();
+    waiting.clear();
   }
-  for (let index = 0; index < SPARE; index++) void open();
-  return { close };
+  topUp();
+  return {
+    close,
+    // After the control connection came back: the waiting connections most likely went with the old network path
+    // (the service lets go of its ends too), so fresh ones are opened at once.
+    reset() {
+      if (closed) return;
+      clearTimeout(retryTimer);
+      retryTimer = undefined;
+      failures = 0;
+      for (const socket of waiting) {
+        discarded.add(socket);
+        socket.terminate();
+      }
+      waiting.clear();
+      topUp();
+    },
+  };
 }
 
 // Waits for a relay WebSocket to open; rejects if it closes or fails first.

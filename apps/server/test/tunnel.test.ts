@@ -69,3 +69,28 @@ test('Linux context targets desktop Bash and its actual schedules path', () => {
   assert.match(prompt, /\.config\/CC Desk Tunnel\/schedules.json/);
   assert.doesNotMatch(prompt, /PowerShell|%APPDATA%/);
 });
+
+test('Linux desktops share one SSH connection and wait for a reconnecting desktop', () => {
+  const linux = sshConfig('/data/connections/id', 32123, 'user', 'ssh-ed25519 AAAATEST', 'linux');
+  assert.match(
+    linux.config,
+    /ControlMaster auto\n {2}ControlPath "\/data\/connections\/id\/cm"\n {2}ControlPersist yes/,
+  );
+  assert.match(linux.config, /ConnectTimeout 30/);
+  // A socket path that does not fit in sun_path would make every ssh fail; such a directory goes without.
+  const long = sshConfig(`/${'x'.repeat(120)}`, 32123, 'user', 'ssh-ed25519 AAAATEST', 'linux');
+  assert.doesNotMatch(long.config, /ControlMaster/);
+  const windows = sshConfig('/data/connections/id', 32123, 'user', 'ssh-ed25519 AAAATEST');
+  assert.doesNotMatch(windows.config, /ControlMaster/);
+  assert.match(windows.config, /ConnectTimeout 5/);
+});
+
+test('Linux context without a scheduler does not point at one', () => {
+  const prompt = remotePrompt(
+    '/home/user/project',
+    { configPath: '/private/ssh_config', powershellPath: '/bin/bash', platform: 'linux' },
+    'session-id',
+  );
+  assert.doesNotMatch(prompt, /undefined|schedules/);
+  assert.match(prompt, /no scheduled prompts/);
+});

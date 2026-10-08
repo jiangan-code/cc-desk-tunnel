@@ -87,6 +87,22 @@ test('native terminal forwards exact UTF-8 data with bounded frames and pauses u
   assert.equal(f.output.map((frame) => frame.text).join(''), text);
 });
 
+test('a terminal waiting for acknowledgment ends after 30 s, but not while its connection is away', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = fixture();
+  f.data('x'.repeat(200 * 1024));
+  assert.equal(f.counts().paused, 1);
+  f.terminal.hold(true);
+  t.mock.timers.tick(10 * 60 * 1000);
+  assert.equal(f.counts().killed, 0);
+  // Back, and still not acknowledging: the usual deadline applies again.
+  f.terminal.hold(false);
+  t.mock.timers.tick(29000);
+  assert.equal(f.counts().killed, 0);
+  t.mock.timers.tick(1000);
+  assert.equal(f.counts().killed, 1);
+});
+
 test('control terminal launches the official CLI directly with remote guidance and no shell, MCP or bypass', () => {
   const args = terminalArguments(
     { executable: '/native/claude', model: 'provider', settingsPath: '/private/provider.json' },

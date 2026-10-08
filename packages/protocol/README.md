@@ -22,7 +22,7 @@
 
 运行状态为 `running → awaiting_approval → running → completed`，也可终止为 `cancelled/failed`。拒绝产生 `tool.result(denied)`，模拟器在解释拒绝后正常完成本轮；错误事件与失败状态分开。
 
-审批与取消必须匹配当前运行及发起连接；摘要里的 `activeRun.connectionId` 让界面显示真实可操作状态。断连结束该连接拥有的运行；重连重新认证，只订阅历史。服务恢复未完成记录时补充工具取消和运行取消事件，不重放操作。
+审批与取消必须匹配当前运行及发起连接；摘要里的 `activeRun.connectionId` 让界面显示真实可操作状态。断连结束该连接拥有的运行；重连重新认证，只订阅历史。例外是声明了 `auth.resumable` 的中继连接（Linux 连接桥）：`ready.resume` 给出密钥与宽限期，双方对认证后的帧计数并以 `resume.ack` 确认；断线后以 `auth.resume` 认证，服务回 `resumed` 后双方各自补发对方未收到的帧，连接 ID、运行和终端不变。连接桥只把 `connection.state` 告诉自己的客户端。详见 [Linux 桌面指南](../../docs/linux-desktop.md#断线续接)。服务恢复未完成记录时补充工具取消和运行取消事件，不重放操作。
 
 同一连接的相同 requestId 返回已缓存响应；不同内容返回冲突。`session.create` 和同一会话内 `message.send` 的 requestId 在记录存续期间持久去重，即使跨连接或服务重启也不重复创建/发送；删除记录后该去重信息也删除。其他请求不跨连接自动重试。超时/断连可能发生在服务已接纳请求之后，客户端以恢复历史确认结果，不自动重发。
 
