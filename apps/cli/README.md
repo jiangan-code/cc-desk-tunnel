@@ -25,7 +25,24 @@ ccdt deck          # 先打开 agent 列表
 
 按键：`Enter` 进入，`n` 新建（输入目录），`d` 结束 agent（对话保留），`x` 删除会话，`r` 改名，`/` 搜索，`j`/`k` 或方向键移动，`q` 退出。看不到的 agent 开始等你或做完一轮时会响铃，窗口标题显示有几个在等你。
 
-一个会话同时只有一个 agent；同一个项目可以开多个会话并行。最多同时运行 8 个。退出 ccdt 会结束全部 agent（对话都保留）；断网 3 分钟内恢复则全部接着运行。状态来自服务端注入原生目录 `.claude/settings.local.json` 的 Claude Code hooks，你在那里加的其他 hooks 会保留。
+一个会话同时只有一个 agent；同一个项目可以开多个会话并行。最多同时运行 8 个。没有后台服务时，退出 ccdt 会结束全部 agent（对话都保留）；断网 3 分钟内恢复则全部接着运行。
+
+## 后台常驻
+
+```bash
+ccdt daemon install      # 装成 systemd 用户服务并启动
+ccdt daemon status       # 是否在运行
+ccdt daemon stop         # 停止（结束它运行的全部 agent）
+ccdt daemon uninstall    # 停止并移除
+```
+
+后台服务持有这台设备到服务端的连接和执行通道，在 `$XDG_RUNTIME_DIR/ccdt.sock`（权限 0600）等待 `ccdt`。它在运行时，`ccdt` 只负责显示：按 `q` 或关掉终端，agent 照常运行；任何终端里再运行 `ccdt` 都能接回，进入时还原整屏画面。几个终端可以同时显示不同的 agent；同一个 agent 后打开的终端接管显示。
+
+- 安装前先退出正在运行的 `ccdt`：同一服务同时只接受一台执行设备。
+- 后台服务启动时从密钥环读凭据；密钥环还锁着时它会失败，systemd 每 10 秒重试，解锁后自动连上。`ccdt login` 换了服务或凭据后，运行 `systemctl --user restart ccdt`。
+- Claude 在本机执行的命令继承后台服务的环境。systemd 的 PATH 不含 `~/.local/bin` 等登录 shell 才加的目录，所以安装时会记下当前终端的 PATH；PATH 变了就再运行一次 `ccdt daemon install`（会重启后台服务）。代理变量不会写进服务配置。
+- 用户服务随桌面登录启动；退出桌面会话后也要保持运行，执行 `loginctl enable-linger`。
+- 日志：`journalctl --user -u ccdt`。与服务端的连接彻底断开（断网超过 3 分钟、服务端重启）时后台服务退出，systemd 10 秒后重新连接，原来的 agent 已结束。状态来自服务端注入原生目录 `.claude/settings.local.json` 的 Claude Code hooks，你在那里加的其他 hooks 会保留。
 
 ## 安装与登录
 

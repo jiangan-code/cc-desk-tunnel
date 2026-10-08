@@ -98,8 +98,17 @@ const KEYS = /\x1b\[[0-9;?]*[A-Za-z~]|\x1bO[A-Za-z]|\x1b|[\s\S]/gu;
 export class Deck {
   constructor(
     connection,
-    { input = process.stdin, output = process.stdout, cwd, host = '', home = homedir() } = {},
+    {
+      input = process.stdin,
+      output = process.stdout,
+      cwd,
+      host = '',
+      home = homedir(),
+      // Agents run in the background daemon and outlive this list.
+      background = false,
+    } = {},
   ) {
+    this.background = background;
     this.connection = connection;
     this.input = input;
     this.output = output;
@@ -293,7 +302,7 @@ export class Deck {
       case 'q':
       case '\x03': {
         const running = this.terminals.size;
-        if (!running) return this.finish({ quit: true });
+        if (!running || this.background) return this.finish({ quit: true });
         this.mode = {
           type: 'confirm',
           text: `还有 ${running} 个 agent 在运行，退出会结束它们。确定退出？(y/N)`,
@@ -340,6 +349,7 @@ export class Deck {
       `${this.terminals.size} 个 agent`,
       count('waiting') && `\x1b[33;1m${count('waiting')} 个等你\x1b[0m`,
       count('busy') && `${count('busy')} 个运行中`,
+      this.background && '\x1b[2m后台常驻\x1b[0m',
     ]
       .filter(Boolean)
       .join(' · ');
