@@ -198,9 +198,15 @@ export const daemonRunning = (path = daemonSocket()) =>
 const UNIT = 'ccdt.service';
 const unitPath = (env = process.env) =>
   join(env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'systemd/user', UNIT);
-const quote = (text) => `"${text.replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`;
+// A value for a unit file: quoted, with systemd's specifier character escaped.
+const quote = (text) =>
+  `"${text.replaceAll('\\', '\\\\').replaceAll('"', '\\"').replaceAll('%', '%%')}"`;
 // The user unit runs this same ccdt (the packaged Electron in Node mode, or Node with this script) in the
 // foreground; systemd restarts it after a failure, such as a keyring still locked at login.
+//
+// Commands Claude runs on this computer inherit the daemon's environment, and systemd's PATH lacks what the login
+// shell adds (~/.local/bin and the like), so the PATH of the shell that installs it is kept. Proxy variables are
+// not: they may hold credentials, and the unit file is readable.
 export function unitFile({
   execPath = process.execPath,
   script = process.argv[1],
@@ -212,6 +218,7 @@ export function unitFile({
     'After=network-online.target',
     '',
     '[Service]',
+    ...(env.PATH ? [`Environment=${quote(`PATH=${env.PATH}`)}`] : []),
     ...(env.ELECTRON_RUN_AS_NODE ? ['Environment=ELECTRON_RUN_AS_NODE=1'] : []),
     `ExecStart=${quote(execPath)} ${quote(script)} daemon run`,
     'Restart=on-failure',
@@ -228,7 +235,9 @@ export async function installDaemon() {
   await mkdir(join(path, '..'), { recursive: true });
   await writeFile(path, unitFile());
   await systemctl('daemon-reload');
-  await systemctl('enable', '--now', UNIT);
+  await systemctl('enable', UNIT);
+  // A daemon already running takes the new unit only when started again.
+  await systemctl('restart', UNIT);
   return path;
 }
 export async function uninstallDaemon() {

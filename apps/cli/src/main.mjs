@@ -190,6 +190,7 @@ async function daemon(command) {
     if (!(await loadConfig())?.token) throw new Error('请先运行 ccdt login。');
     const path = await installDaemon();
     console.log(`已安装并启动后台服务：${path}`);
+    console.log('它运行的命令使用本终端此刻的 PATH；PATH 变了就再运行一次 ccdt daemon install。');
     console.log(
       '之后运行 ccdt 会连到它；关掉终端 agent 也继续运行。日志：journalctl --user -u ccdt',
     );

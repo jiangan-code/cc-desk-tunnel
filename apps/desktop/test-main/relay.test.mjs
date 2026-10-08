@@ -540,13 +540,19 @@ test(
     assert.match(snapshot.data, /got hello/);
     second.connection.close();
 
+    const unit = unitFile({
+      execPath: '/opt/CC Desk Tunnel/cc-desk-tunnel',
+      script: '/opt/x/ccdt.mjs',
+      env: {
+        ELECTRON_RUN_AS_NODE: '1',
+        PATH: '/home/u/.local/bin:/usr/bin',
+        https_proxy: 'http://u:p@h',
+      },
+    });
     assert.match(
-      unitFile({
-        execPath: '/opt/CC Desk Tunnel/cc-desk-tunnel',
-        script: '/opt/x/ccdt.mjs',
-        env: { ELECTRON_RUN_AS_NODE: '1' },
-      }),
-      /Environment=ELECTRON_RUN_AS_NODE=1\nExecStart="\/opt\/CC Desk Tunnel\/cc-desk-tunnel" "\/opt\/x\/ccdt.mjs" daemon run/,
+      unit,
+      /Environment="PATH=\/home\/u\/.local\/bin:\/usr\/bin"\nEnvironment=ELECTRON_RUN_AS_NODE=1\nExecStart="\/opt\/CC Desk Tunnel\/cc-desk-tunnel" "\/opt\/x\/ccdt.mjs" daemon run/,
     );
+    assert.doesNotMatch(unit, /proxy/, 'no proxy credentials in the unit file');
   },
 );
