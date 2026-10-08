@@ -2,6 +2,8 @@ import { realpath, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, resolve } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
+import { addWorktree, ownWorktree, removeWorktree, repositoryOf } from './git.mjs';
+import { newlyWaiting, notify } from './notify.mjs';
 
 // Cells a text takes in a terminal: East Asian wide characters take two. The list draws only characters whose width
 // is not ambiguous, as glyphs like ● overlap their neighbours in some terminals.
@@ -65,20 +67,31 @@ const STATUS = {
 };
 const STOPPED = ['未启动', '2'];
 
-// The list's rows: sessions grouped by project directory, the most recently active group first; in a group, running
-// agents first, then by activity. A filter keeps sessions whose title or directory contains it.
-export function deckRows(sessions, terminals, filter = '', home = homedir()) {
+// The list's rows: sessions grouped by repository (a repository's worktrees with its main checkout; a directory
+// outside git on its own), the most recently active group first; in a group, running agents first, then by
+// activity. A filter keeps sessions whose title, directory or branch contains it.
+export function deckRows(
+  sessions,
+  terminals,
+  filter = '',
+  home = homedir(),
+  repositories = new Map(),
+) {
   const needle = filter.trim().toLowerCase();
   const groups = new Map();
   for (const session of sessions) {
-    const shown = tilde(session.projectPath, home);
-    if (needle && !`${session.title} ${shown}`.toLowerCase().includes(needle)) continue;
+    const repository = repositories.get(session.projectPath);
+    const key = repository?.root ?? session.projectPath;
+    const shown = tilde(key, home);
+    const branch = repository?.branch ?? null;
+    const words = `${session.title} ${tilde(session.projectPath, home)} ${branch ?? ''}`;
+    if (needle && !words.toLowerCase().includes(needle)) continue;
     const terminal = terminals.get(session.id);
     const activity =
       terminal && terminal.since > session.updatedAt ? terminal.since : session.updatedAt;
-    let group = groups.get(session.projectPath);
-    if (!group) groups.set(session.projectPath, (group = { shown, latest: '', items: [] }));
-    group.items.push({ session, terminal, activity });
+    let group = groups.get(key);
+    if (!group) groups.set(key, (group = { shown, latest: '', items: [] }));
+    group.items.push({ session, terminal, activity, branch, repository });
     if (activity > group.latest) group.latest = activity;
   }
   const rows = [];
@@ -116,6 +129,8 @@ export class Deck {
     this.host = host;
     this.home = home;
     this.sessions = new Map(connection.ready.sessions.map((session) => [session.id, session]));
+    // Project directory → its repository, read with git on this computer; null outside one.
+    this.repositories = new Map();
     this.terminals = new Map();
     this.selected = null;
     this.filter = '';
@@ -141,6 +156,13 @@ export class Deck {
     else if (message.type === 'terminals.state') {
       const previous = this.terminals;
       this.terminals = new Map(message.terminals.map((terminal) => [terminal.sessionId, terminal]));
+      // With the daemon running, the daemon notifies.
+      if (!this.background)
+        for (const terminal of newlyWaiting(previous, message.terminals))
+          notify(
+            `${this.sessions.get(terminal.sessionId)?.title ?? 'agent'} 等你`,
+            '在 ccdt 里进入处理。',
+          );
       for (const terminal of this.terminals.values()) {
         const before = previous.get(terminal.sessionId)?.status;
         if (
@@ -158,6 +180,14 @@ export class Deck {
     } else return;
     if (this.shown) this.render();
   }
+  // Branches change while agents work, so they are read again each time the list shows.
+  async readRepositories() {
+    const paths = new Set([...this.sessions.values()].map((session) => session.projectPath));
+    await Promise.all(
+      [...paths].map(async (path) => this.repositories.set(path, await repositoryOf(path))),
+    );
+    if (this.shown) this.render();
+  }
   notice(text) {
     this.message = text;
     if (this.shown) this.render();
@@ -166,6 +196,7 @@ export class Deck {
   choose(message = '') {
     this.message = message;
     this.attached = null;
+    void this.readRepositories();
     return new Promise((resolve) => {
       this.resolve = resolve;
       this.show();
@@ -196,10 +227,17 @@ export class Deck {
     this.resolve = null;
     resolve?.(result);
   }
-  items() {
-    return deckRows(this.sessions.values(), this.terminals, this.filter, this.home).filter(
-      (row) => !row.header,
+  rows() {
+    return deckRows(
+      this.sessions.values(),
+      this.terminals,
+      this.filter,
+      this.home,
+      this.repositories,
     );
+  }
+  items() {
+    return this.rows().filter((row) => !row.header);
   }
   current() {
     return this.items().find((item) => item.session.id === this.selected) ?? this.items()[0];
@@ -277,15 +315,37 @@ export class Deck {
             }),
         };
         return;
-      case 'x':
-        if (!item) return;
-        if (item.terminal) return void (this.message = '先按 d 结束这个 agent，再删除会话。');
+      case 'w': {
+        const project = item?.repository?.root ?? item?.session.projectPath ?? this.cwd;
+        const stamp = new Date().toISOString().slice(5, 16).replace(/[-T:]/g, '');
         this.mode = {
-          type: 'confirm',
-          text: `删除会话「${item.session.title}」？它的对话记录会一并删除。(y/N)`,
-          yes: () => this.act({ type: 'session.delete', sessionId: item.session.id }, '已删除。'),
+          type: 'prompt',
+          label: `${tilde(project, this.home)} 的新 worktree 分支：`,
+          value: `ccdt/${stamp}`,
+          submit: (branch) => branch && this.createWorktree(project, branch),
         };
         return;
+      }
+      case 'x': {
+        if (!item) return;
+        if (item.terminal) return void (this.message = '先按 d 结束这个 agent，再删除会话。');
+        const path = item.session.projectPath;
+        // A worktree ccdt made goes with its last session; its branch stays for merging.
+        const worktree =
+          item.repository &&
+          ownWorktree(item.repository.root, path) &&
+          ![...this.sessions.values()].some(
+            (other) => other.id !== item.session.id && other.projectPath === path,
+          );
+        this.mode = {
+          type: 'confirm',
+          text: worktree
+            ? `删除会话「${item.session.title}」和它的 worktree（分支 ${item.branch ?? '?'} 保留）？(y/N)`
+            : `删除会话「${item.session.title}」？它的对话记录会一并删除。(y/N)`,
+          yes: () => this.remove(item.session.id, worktree ? path : null),
+        };
+        return;
+      }
       case 'r':
         if (!item) return;
         this.mode = {
@@ -312,8 +372,30 @@ export class Deck {
       }
     }
   }
+  async remove(sessionId, worktree) {
+    if (worktree)
+      try {
+        await removeWorktree(worktree);
+      } catch (error) {
+        return this.notice(error.message);
+      }
+    this.act(
+      { type: 'session.delete', sessionId },
+      worktree ? '已删除会话和 worktree。' : '已删除。',
+    );
+  }
+  async createWorktree(project, branch) {
+    this.notice(`创建 worktree ${branch} …`);
+    let path;
+    try {
+      path = await addWorktree(project, branch);
+    } catch (error) {
+      return this.notice(error.message);
+    }
+    return this.create(path, branch);
+  }
   // A new session for a directory on this computer, opened at once.
-  async create(path) {
+  async create(path, title) {
     if (!path) return;
     const expanded = path === '~' || path.startsWith('~/') ? this.home + path.slice(1) : path;
     let projectPath;
@@ -326,7 +408,7 @@ export class Deck {
     try {
       const { sessionId } = await this.connection.request({
         type: 'session.create',
-        title: basename(projectPath).slice(0, 120) || projectPath.slice(-120),
+        title: (title ?? basename(projectPath)).slice(0, 120) || projectPath.slice(-120),
         projectPath,
       });
       this.selected = sessionId;
@@ -339,7 +421,7 @@ export class Deck {
     if (!this.shown) return;
     const width = Math.max(40, this.output.columns || 80);
     const height = Math.max(10, this.output.rows || 24);
-    const rows = deckRows(this.sessions.values(), this.terminals, this.filter, this.home);
+    const rows = this.rows();
     const items = rows.filter((row) => !row.header);
     if (!items.some((item) => item.session.id === this.selected))
       this.selected = items[0]?.session.id ?? null;
@@ -369,7 +451,7 @@ export class Deck {
       const text =
         ` ${selected ? '>' : ' '} \x1b[${colour}m${fit(label, 6)}\x1b[0m` +
         (selected ? '\x1b[7m' : '') +
-        ` ${fit(row.session.title, width - 24)} ${fit(time, 11)}` +
+        ` ${fit(row.branch ? `${row.session.title}  [${row.branch}]` : row.session.title, width - 24)} ${fit(time, 11)}` +
         '\x1b[0m';
       body.push({ text, selected });
     }
@@ -402,7 +484,7 @@ export class Deck {
     } else lines.push(` ${fit(this.message, width - 2)}`);
     const keys = mode
       ? 'Enter 确认  Esc 取消'
-      : `Enter 进入  n 新建  d 结束  x 删除  r 改名  / 搜索  q 退出${width >= 86 ? '  |  Ctrl+Q 从 agent 回到这里' : ''}`;
+      : `Enter 进入  n 新建  w worktree  d 结束  x 删除  r 改名  / 搜索  q 退出${width >= 98 ? '  |  Ctrl+Q 从 agent 回到这里' : ''}`;
     lines.push(` \x1b[2m${fit(keys, width - 2)}\x1b[0m`);
     this.output.write(
       '\x1b[H' +

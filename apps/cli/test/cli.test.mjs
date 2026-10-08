@@ -9,7 +9,13 @@ import { environmentProxy } from '../src/environment.mjs';
 import { chooseSession } from '../src/main.mjs';
 import { attachTerminal, inputFrames } from '../src/terminal.mjs';
 import { Deck, cellWidth, deckRows, fit } from '../src/deck.mjs';
+import { addWorktree, ownWorktree, removeWorktree, repositoryOf } from '../src/git.mjs';
+import { newlyWaiting } from '../src/notify.mjs';
+import { execFileSync } from 'node:child_process';
+import { realpath } from 'node:fs/promises';
 
+// Tests must not put notifications on the desktop.
+process.env.CCDT_NOTIFY = '0';
 const SESSION = '11111111-1111-4111-8111-111111111111';
 const TERMINAL = '22222222-2222-4222-8222-222222222222';
 
@@ -331,4 +337,81 @@ test('the agent list opens, ends and leaves agents with confirmation', async () 
   assert.equal(deck.shown, true);
   tty.input.emit('data', Buffer.from('qy'));
   assert.deepEqual(await chosen, { quit: true });
+});
+
+test('worktrees sit beside their repository, group with it, and go only when clean', async (t) => {
+  const base = await realpath(await mkdtemp(join(tmpdir(), 'ccdt-git-')));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const root = join(base, 'repo');
+  await mkdir(root);
+  const git = (...args) =>
+    execFileSync('git', ['-C', root, ...args], {
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: 't',
+        GIT_AUTHOR_EMAIL: 't@t',
+        GIT_COMMITTER_NAME: 't',
+        GIT_COMMITTER_EMAIL: 't@t',
+      },
+    });
+  git('init', '-q', '-b', 'main');
+  assert.equal(await repositoryOf(root), null, 'no commit yet');
+  await writeFile(join(root, 'a.txt'), 'a');
+  git('add', '.');
+  git('commit', '-qm', 'a');
+
+  const path = await addWorktree(root, 'ccdt/修复');
+  assert.equal(path, join(base, 'repo.worktrees', 'ccdt-修复'));
+  assert.deepEqual(await repositoryOf(path), { root, top: path, branch: 'ccdt/修复' });
+  assert.deepEqual(await repositoryOf(root), { root, top: root, branch: 'main' });
+  assert.equal(ownWorktree(root, path), true);
+  assert.equal(ownWorktree(root, root), false);
+  await assert.rejects(addWorktree(root, 'bad..name'), /分支名不可用/);
+
+  const repositories = new Map([
+    [root, await repositoryOf(root)],
+    [path, await repositoryOf(path)],
+  ]);
+  const now = new Date().toISOString();
+  const rows = deckRows(
+    [
+      { id: 'm', projectPath: root, title: '主线', updatedAt: now },
+      { id: 'w', projectPath: path, title: '修复', updatedAt: now },
+    ],
+    new Map(),
+    '',
+    base,
+    repositories,
+  );
+  assert.equal(rows.filter((row) => row.header).length, 1, 'one group for the repository');
+  assert.deepEqual(
+    rows
+      .filter((row) => !row.header)
+      .map((row) => row.branch)
+      .sort(),
+    ['ccdt/修复', 'main'],
+  );
+
+  await writeFile(join(path, 'b.txt'), 'b');
+  await assert.rejects(removeWorktree(path), /未提交的改动/);
+  await rm(join(path, 'b.txt'));
+  assert.equal(await removeWorktree(path), 'ccdt/修复');
+  git('show-ref', '--verify', '--quiet', 'refs/heads/ccdt/修复');
+  await assert.rejects(removeWorktree(root), /不是 ccdt 创建的 worktree/);
+  // The branch is still there, so the same name checks it out again.
+  assert.equal(await addWorktree(root, 'ccdt/修复'), path);
+});
+
+test('only agents that newly wait and are not on screen notify', () => {
+  const previous = new Map([['a', { sessionId: 'a', status: 'waiting' }]]);
+  const terminals = [
+    { sessionId: 'a', status: 'waiting', attached: false },
+    { sessionId: 'b', status: 'waiting', attached: false },
+    { sessionId: 'c', status: 'waiting', attached: true },
+    { sessionId: 'd', status: 'busy', attached: false },
+  ];
+  assert.deepEqual(
+    newlyWaiting(previous, terminals).map((terminal) => terminal.sessionId),
+    ['b'],
+  );
 });

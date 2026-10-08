@@ -9,6 +9,7 @@ import { promisify } from 'node:util';
 import { WebSocket, WebSocketServer } from 'ws';
 import { PROTOCOL_VERSION, serverMessageSchema } from '@cc-desk-tunnel/protocol';
 import { openProxyBridge } from '../../desktop/electron/proxy-bridge.mjs';
+import { newlyWaiting, notify } from './notify.mjs';
 
 // The background service keeps this device's connection, and with it the agents, while no terminal shows them.
 // Terminals reach it over a Unix socket only the user can open, and speak the service's own protocol to it.
@@ -101,6 +102,7 @@ export async function startDaemon(
     if (upstream.readyState === WebSocket.OPEN) upstream.send(text);
   });
   let failure = null;
+  let statuses = new Map();
   const ended = new Promise((resolve) => upstream.once('close', () => resolve(failure)));
   upstream.on('error', (error) => (failure ??= error.message));
   try {
@@ -137,6 +139,15 @@ export async function startDaemon(
           return resolve();
         }
         hub.fromService(text, message);
+        // The daemon notifies, so an agent waiting is noticed with no terminal open.
+        if (message.type === 'terminals.state') {
+          for (const terminal of newlyWaiting(statuses, message.terminals))
+            notify(
+              `${hub.sessions.get(terminal.sessionId)?.title ?? 'agent'} 等你`,
+              '运行 ccdt 进入处理。',
+            );
+          statuses = new Map(message.terminals.map((terminal) => [terminal.sessionId, terminal]));
+        }
       });
       ended.then((reason) => reject(new Error(reason ?? '连接服务失败。')));
     });
