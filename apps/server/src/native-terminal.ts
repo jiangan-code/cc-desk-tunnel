@@ -38,8 +38,14 @@ export type TerminalSpawner = (
   options: { cwd: string; cols: number; rows: number; env: Record<string, string>; name: string },
 ) => TerminalProcess;
 
-export function terminalArguments(options: ClaudeOptions, session: Session, ssh: SshConnection) {
+export function terminalArguments(
+  options: ClaudeOptions,
+  session: Session,
+  ssh: SshConnection,
+  continued = false,
+) {
   return [
+    ...(continued ? ['--continue'] : []),
     '--permission-mode',
     session.permissionMode === 'default' ? 'manual' : session.permissionMode,
     '--append-system-prompt',

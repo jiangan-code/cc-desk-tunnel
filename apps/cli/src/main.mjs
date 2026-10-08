@@ -17,7 +17,7 @@ const USAGE = `用法：
   ccdt --help | --version
 
 选项：
-  -n, --new                      新建会话，而不是接着用这个目录最近的会话
+  -n, --new                      新建会话，而不是接着这个目录最近的对话
   -m, --model <模型>             会话模型
       --effort <强度>            low / medium / high / xhigh / max
       --permission-mode <模式>   auto / default / plan / acceptEdits
@@ -202,7 +202,7 @@ async function run(directory, values) {
     const session = await chooseSession(connection, projectPath, values);
     abort.signal.throwIfAborted();
     clearStatus();
-    terminal = attachTerminal(connection, session.id);
+    terminal = attachTerminal(connection, session.id, { continued: !values.new });
     let code;
     try {
       code = await terminal.exited;

@@ -188,7 +188,8 @@ test('terminal joins the local tty to the remote CLI and restores it on exit', a
 
 test('a dropped connection ends the terminal with its reason', async () => {
   const connection = fakeConnection();
-  const terminal = attachTerminal(connection, SESSION, fakeTty());
+  const terminal = attachTerminal(connection, SESSION, { ...fakeTty(), continued: true });
+  assert.equal(connection.requests[0].continue, true);
   connection.drop('本机 SSH 连接准备超时。');
   await assert.rejects(terminal.exited, /SSH/);
 });
