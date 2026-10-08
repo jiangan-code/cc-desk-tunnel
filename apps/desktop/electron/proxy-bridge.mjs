@@ -8,6 +8,7 @@ import { pipeline } from 'node:stream/promises';
 import { WebSocket, WebSocketServer } from 'ws';
 import { serverMessageSchema, MAX_FRAME_BYTES } from '@cc-desk-tunnel/protocol';
 import { startLinuxTunnel } from './linux-tunnel.mjs';
+import { opened } from './relay.mjs';
 import { startWindowsTunnel } from './windows-tunnel.mjs';
 import { httpProxy, openSocket } from './system-proxy.mjs';
 
@@ -101,9 +102,11 @@ export async function openProxyBridge(
     }
     wss.handleUpgrade(request, socket, head, (ws) => wss.emit('connection', ws));
   });
-  wss.on('connection', (local) => {
-    // CA verification completes at TLS handshake; explicit pins are checked before sending credentials.
-    const remote = new WebSocket(address, {
+  // A WebSocket to the service. CA verification completes at TLS handshake; explicit pins are checked by the caller
+  // once it is open, before anything is sent.
+  const serviceSocket = (options) =>
+    new WebSocket(address, {
+      ...options,
       // Node's HTTP client also takes the connection through this callback once it is ready.
       createConnection: (_options, created) => {
         connectService(address, config, binaries.resolveProxy).then(
@@ -112,6 +115,20 @@ export async function openProxyBridge(
         );
       },
     });
+  const pinned = (socket) =>
+    !config.fingerprint ||
+    certificateMatches(socket._socket.getPeerCertificate().fingerprint256, config.fingerprint);
+  // A relay connection for the Linux tunnel, open and with a verified certificate.
+  async function openRelay() {
+    const socket = await opened(serviceSocket({ maxPayload: MAX_FRAME_BYTES }));
+    if (pinned(socket)) return socket;
+    socket.terminate();
+    throw new Error('服务证书指纹不匹配；未发送服务凭据。');
+  }
+  // Linux reaches its SSH endpoint over the service's WSS relay; Windows keeps frp.
+  const relay = process.platform === 'linux';
+  wss.on('connection', (local) => {
+    const remote = serviceSocket();
     pair = { local, remote, controller: new AbortController(), tunnel: null, preparing: null };
     const current = pair;
     const queue = [];
@@ -126,10 +143,7 @@ export async function openProxyBridge(
       void close(true);
     }
     remote.on('open', () => {
-      if (
-        config.fingerprint &&
-        !certificateMatches(remote._socket.getPeerCertificate().fingerprint256, config.fingerprint)
-      ) {
+      if (!pinned(remote)) {
         fail('服务证书指纹不匹配；未发送服务凭据。');
         return;
       }
@@ -143,6 +157,7 @@ export async function openProxyBridge(
         if (message.type?.startsWith('tunnel.')) throw new Error('Renderer tunnel message');
         if (message.type === 'auth') {
           message.tunnel = true;
+          message.tunnelTransport = relay ? 'relay' : 'frp';
           message.deviceName = process.platform === 'linux' ? 'Linux desktop' : 'Windows desktop';
           token = String(message.token);
         }
@@ -162,7 +177,7 @@ export async function openProxyBridge(
       }
       // A service of another version refuses the connection but may still offer the installer for its own.
       if (message.type === 'connection.error' && message.client) release = message.client;
-      if (message.type === 'tunnel.configure') {
+      if (message.type === (relay ? 'tunnel.relay' : 'tunnel.configure')) {
         if (
           configurationReceived ||
           !nativeReady ||
@@ -172,9 +187,9 @@ export async function openProxyBridge(
           return;
         }
         configurationReceived = true;
-        current.preparing = (process.platform === 'linux' ? startLinuxTunnel : startWindowsTunnel)(
+        current.preparing = (relay ? startLinuxTunnel : startWindowsTunnel)(
           message,
-          binaries,
+          relay ? { schedulesPath: binaries.schedulesPath, openRelay } : binaries,
           current.controller.signal,
           fail,
         )
@@ -184,6 +199,9 @@ export async function openProxyBridge(
               remote.send(JSON.stringify(tunnel.credentials));
           })
           .catch((error) => fail(error.message));
+      } else if (message.type === 'tunnel.configure' || message.type === 'tunnel.relay') {
+        // The other transport's offer, which this platform did not ask for; it never reaches the renderer.
+        fail('隧道方式不匹配。');
       } else if (message.type === 'ready' && message.adapter === 'claude-code') {
         nativeReady = message;
         release = message.client;

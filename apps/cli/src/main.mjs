@@ -1,4 +1,4 @@
-import { readFile, realpath, stat } from 'node:fs/promises';
+import { realpath, stat } from 'node:fs/promises';
 import { basename, resolve } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { parseArgs } from 'node:util';
@@ -6,7 +6,8 @@ import { effortSchema, permissionModeSchema } from '@cc-desk-tunnel/protocol';
 import { controlTlsOptions, openProxyBridge } from '../../desktop/electron/proxy-bridge.mjs';
 import { clearConfig, configDirectory, desktopLogin, loadConfig, saveConfig } from './config.mjs';
 import { openConnection } from './connection.mjs';
-import { environmentProxy, findFrpc } from './environment.mjs';
+import { environmentProxy } from './environment.mjs';
+import manifest from '../package.json' with { type: 'json' };
 import { attachTerminal, TERMINAL_RESET } from './terminal.mjs';
 
 const USAGE = `用法：
@@ -23,7 +24,7 @@ const USAGE = `用法：
 
 login 选项：--url <wss://…> --fingerprint <SHA256> --token-stdin（从标准输入读凭据）
 
-环境变量：CCDT_TOKEN 覆盖保存的凭据；https_proxy / no_proxy 设定代理；PROXY_FRPC_PATH 指定 frpc。
+环境变量：CCDT_TOKEN 覆盖保存的凭据；https_proxy / no_proxy 设定代理。
 同一服务同时只运行一个原生终端或运行；桌面客户端占用时会提示忙。`;
 
 const status = (text) => process.stderr.write(`\r\x1b[2K\x1b[2m${text}\x1b[0m`);
@@ -53,10 +54,7 @@ export async function main(argv) {
   }
   const { values, positionals } = parsed;
   if (values.help) return (console.log(USAGE), 0);
-  if (values.version) {
-    const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url)));
-    return (console.log(manifest.version), 0);
-  }
+  if (values.version) return (console.log(manifest.version), 0);
   try {
     if (positionals[0] === 'login') return await login(values);
     if (positionals[0] === 'logout') {
@@ -170,7 +168,7 @@ async function run(directory, values) {
   if (!config.token)
     throw new Error('找不到服务凭据（密钥环可能已锁定）；请运行 ccdt login 或设置 CCDT_TOKEN。');
 
-  // Until the terminal is attached, Ctrl+C and hang-ups stop the connection attempt and clean up frpc and SSH.
+  // Until the terminal is attached, Ctrl+C and hang-ups stop the connection attempt and clean up the SSH endpoint.
   const abort = new AbortController();
   let terminal;
   const stop = () => (terminal ? terminal.close() : abort.abort());
@@ -181,7 +179,7 @@ async function run(directory, values) {
     status(`连接 ${new URL(config.url).host} …`);
     bridge = await openProxyBridge(
       { url: config.url, fingerprint: config.fingerprint },
-      { frpc: await findFrpc(), resolveProxy: async (target) => environmentProxy(target) },
+      { resolveProxy: async (target) => environmentProxy(target) },
     );
     abort.signal.throwIfAborted();
     status('建立本机执行通道 …');

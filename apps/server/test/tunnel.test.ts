@@ -13,6 +13,7 @@ test('SSH config pins loopback target and host key, disallows interactive/agent 
   assert.match(files.config, /StrictHostKeyChecking yes/);
   assert.match(files.config, /BatchMode yes/);
   assert.match(files.config, /ForwardAgent no/);
+  assert.match(files.config, /IgnoreUnknown WarnWeakCrypto\n {2}WarnWeakCrypto no/);
   assert.equal(files.knownHosts, '[127.0.0.1]:32123 ssh-ed25519 AAAATEST\n');
 });
 test('context references native SSH configuration without inventing execution tools', () => {

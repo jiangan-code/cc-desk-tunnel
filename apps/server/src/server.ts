@@ -16,6 +16,7 @@ import {
   commandSchema,
   MAX_FRAME_BYTES,
   PROTOCOL_VERSION,
+  tunnelAttachSchema,
   tunnelCredentialsSchema,
   terminalControlSchema,
 } from '@cc-desk-tunnel/protocol';
@@ -26,6 +27,7 @@ import type {
   ServerMessage,
   Session,
   TerminalControl,
+  TunnelAttach,
   TunnelCredentials,
 } from '@cc-desk-tunnel/protocol';
 import { runClaude, nativeDirectory, prepareNativeDirectory, readNativeStatus } from './claude.ts';
@@ -34,6 +36,7 @@ import { ClientReleases } from './client-release.ts';
 import { DomainError } from './errors.ts';
 import type { NativeLogin } from './native-account.ts';
 import { NativeInput } from './native-input.ts';
+import { RelayTunnel } from './relay.ts';
 import { completeOnboarding } from './native-onboarding.ts';
 import { readNativeSettings, updateNativeSettings } from './native-settings.ts';
 import type { NativeTerminal } from './native-terminal.ts';
@@ -51,6 +54,8 @@ type Peer = {
   id: string;
   address: string;
   authenticated: boolean;
+  // A relay connection of the tunnel owner: it carries SSH bytes, not protocol frames.
+  relay?: boolean;
   tunnel?: WindowsTunnel;
   registering: boolean;
   subscriptions: Set<string>;
@@ -857,9 +862,15 @@ export function createProxyServer(options: ServerOptions) {
         return true;
       }
       tunnelOwner = peer;
-      peer.tunnel = new WindowsTunnel(options.tunnel, store.directory, peer.id, () => {
-        peer.socket.close(4003, 'Tunnel process closed');
-      });
+      const relay = auth.data.tunnelTransport === 'relay';
+      peer.tunnel = new (relay ? RelayTunnel : WindowsTunnel)(
+        options.tunnel,
+        store.directory,
+        peer.id,
+        () => {
+          peer.socket.close(4003, 'Tunnel process closed');
+        },
+      );
       track(
         peer.tunnel
           .start()
@@ -868,13 +879,34 @@ export function createProxyServer(options: ServerOptions) {
             send(peer, {
               type: 'connection.error',
               code: 'tunnel_failed',
-              message: 'frps 启动失败，请检查服务配置与端口。',
+              message: relay
+                ? '执行通道启动失败，请检查服务配置。'
+                : 'frps 启动失败，请检查服务配置与端口。',
             });
             peer.socket.close(4003, 'Tunnel failed');
           }),
         tunnelTasks,
       );
     }
+    return true;
+  }
+  // A relay connection signs in with the secret its desktop received over the control connection. A wrong secret
+  // counts against the address like a wrong token.
+  function attachRelay(peer: Peer, attach: TunnelAttach) {
+    const owner = tunnelOwner;
+    if (
+      !owner ||
+      owner.id !== attach.connectionId ||
+      !(owner.tunnel instanceof RelayTunnel) ||
+      !owner.tunnel.matches(attach.secret)
+    ) {
+      refuse(peer.address);
+      peer.socket.close(4001, 'Unauthorized');
+      return false;
+    }
+    throttle.succeed(peer.address);
+    peer.relay = true;
+    if (!owner.tunnel.attach(peer.socket)) peer.socket.close(4008, 'Relay full');
     return true;
   }
   function registerTunnel(peer: Peer, credentials: TunnelCredentials) {
@@ -1017,6 +1049,7 @@ export function createProxyServer(options: ServerOptions) {
     }, 15000);
     socket.on('error', () => socket.terminate());
     socket.on('message', (data, isBinary) => {
+      if (peer.relay) return;
       let value: unknown;
       try {
         if (isBinary) throw new Error('Binary frame');
@@ -1031,7 +1064,8 @@ export function createProxyServer(options: ServerOptions) {
         return;
       }
       if (!peer.authenticated) {
-        if (authenticate(peer, value)) {
+        const attach = tunnelAttachSchema.safeParse(value);
+        if (attach.success ? attachRelay(peer, attach.data) : authenticate(peer, value)) {
           clearTimeout(authTimer);
           throttle.leave(address);
         }
@@ -1061,7 +1095,7 @@ export function createProxyServer(options: ServerOptions) {
     socket.on('close', (code) => {
       clearTimeout(authTimer);
       clearInterval(heartbeat);
-      if (!peer.authenticated) throttle.leave(address);
+      if (!peer.authenticated && !peer.relay) throttle.leave(address);
       // Why a connection ended is the first thing needed when a run was cut short.
       const owned = [...runs.values()].filter((run) => run.owner === peer).length;
       if (peer.authenticated && !closing)

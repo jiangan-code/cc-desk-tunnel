@@ -16,6 +16,8 @@ export type TunnelOptions = {
   serverName: string;
   bindHost?: string;
 };
+// What the desktop needs to open its side of the tunnel.
+export type TunnelOffer = Extract<ServerMessage, { type: 'tunnel.configure' | 'tunnel.relay' }>;
 export type SshConnection = {
   configPath: string;
   powershellPath: string;
@@ -98,6 +100,10 @@ export function sshConfig(
       '  ServerAliveCountMax 2',
       '  ForwardAgent no',
       '  ClearAllForwardings yes',
+      // The Linux desktop's SSH implementation has no post-quantum key exchange, which OpenSSH 10.1+ reports on every
+      // command's stderr. The connection only ever runs inside the service's verified TLS, which carries that concern.
+      '  IgnoreUnknown WarnWeakCrypto',
+      '  WarnWeakCrypto no',
       '',
     ].join('\n'),
   };
@@ -118,7 +124,7 @@ export class WindowsTunnel {
     this.directory = join(dataDir, 'connections', id);
     this.unexpectedClose = unexpectedClose;
   }
-  async start(): Promise<Extract<ServerMessage, { type: 'tunnel.configure' }>> {
+  async start(): Promise<TunnelOffer> {
     const { options } = this;
     mkdirSync(this.directory, { recursive: true, mode: 0o700 });
     this.remotePort = await availablePort();
