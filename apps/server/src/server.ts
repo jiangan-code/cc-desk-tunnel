@@ -1,4 +1,4 @@
-import { randomUUID, createHash, timingSafeEqual } from 'node:crypto';
+import { randomBytes, randomUUID, createHash, timingSafeEqual } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
@@ -9,6 +9,7 @@ import {
   deleteSession,
   forkSession,
   getSessionMessages,
+  listSessions,
   renameSession,
 } from '@anthropic-ai/claude-agent-sdk';
 import {
@@ -16,6 +17,9 @@ import {
   commandSchema,
   MAX_FRAME_BYTES,
   PROTOCOL_VERSION,
+  ResumeLog,
+  resumeAckSchema,
+  tunnelAttachSchema,
   tunnelCredentialsSchema,
   terminalControlSchema,
 } from '@cc-desk-tunnel/protocol';
@@ -26,6 +30,7 @@ import type {
   ServerMessage,
   Session,
   TerminalControl,
+  TunnelAttach,
   TunnelCredentials,
 } from '@cc-desk-tunnel/protocol';
 import { runClaude, nativeDirectory, prepareNativeDirectory, readNativeStatus } from './claude.ts';
@@ -34,6 +39,7 @@ import { ClientReleases } from './client-release.ts';
 import { DomainError } from './errors.ts';
 import type { NativeLogin } from './native-account.ts';
 import { NativeInput } from './native-input.ts';
+import { RelayTunnel } from './relay.ts';
 import { completeOnboarding } from './native-onboarding.ts';
 import { readNativeSettings, updateNativeSettings } from './native-settings.ts';
 import type { NativeTerminal } from './native-terminal.ts';
@@ -51,10 +57,16 @@ type Peer = {
   id: string;
   address: string;
   authenticated: boolean;
+  // A relay connection of the tunnel owner: it carries SSH bytes, not protocol frames.
+  relay?: boolean;
   tunnel?: WindowsTunnel;
   registering: boolean;
   subscriptions: Set<string>;
   responses: Map<string, { command: string; response: Promise<ServerMessage> }>;
+  // A connection whose client reconnects by itself outlives a network drop for a grace period: its frames are
+  // numbered and held until acknowledged, and its runs, terminal and tunnel wait for it (`detached`).
+  resume?: { key: string; log: ResumeLog };
+  detached?: ReturnType<typeof setTimeout>;
 };
 export type Run = {
   id: string;
@@ -88,6 +100,8 @@ export type ServerOptions = {
   clientDir?: string;
   // Following the published releases; absent, the service neither looks for nor installs newer versions.
   updates?: Omit<UpdateOptions, 'clientDir'>;
+  // How long a dropped resumable connection is kept for its client to come back.
+  resumeGraceMs?: number;
 };
 
 export function createProxyServer(options: ServerOptions) {
@@ -131,6 +145,7 @@ export function createProxyServer(options: ServerOptions) {
       )
     : undefined;
   const throttle = new Throttle();
+  const graceMs = options.resumeGraceMs ?? 180000;
   // Behind the reverse proxy every socket comes from the proxy itself; it passes the client on in X-Real-IP.
   const addressOf = (request: IncomingMessage) =>
     (options.reverseProxy && [request.headers['x-real-ip']].flat()[0]) ||
@@ -196,7 +211,75 @@ export function createProxyServer(options: ServerOptions) {
   });
 
   function send(peer: Peer, message: ServerMessage) {
-    if (peer.socket.readyState === WebSocket.OPEN) peer.socket.send(JSON.stringify(message));
+    const frame = JSON.stringify(message);
+    // A dropped connection collects what it misses, up to a limit; past it, it is given up.
+    if (peer.resume && !peer.resume.log.record(frame) && peer.detached) {
+      expire(peer, 'too much output waiting for it');
+      return;
+    }
+    if (peer.socket.readyState === WebSocket.OPEN) peer.socket.send(frame);
+  }
+  function detach(peer: Peer) {
+    console.log(
+      `Connection ${peer.id.slice(0, 8)} dropped; kept ${graceMs / 1000}s for its client to reconnect`,
+    );
+    peer.detached = setTimeout(() => expire(peer, `not back within ${graceMs / 1000}s`), graceMs);
+    if (terminal?.owner === peer) terminal.process?.hold(true);
+    if (peer.tunnel instanceof RelayTunnel) peer.tunnel.recheck();
+  }
+  function expire(peer: Peer, why: string) {
+    if (!peer.detached) return;
+    clearTimeout(peer.detached);
+    peer.detached = undefined;
+    peer.resume = undefined;
+    const owned = [...runs.values()].filter((run) => run.owner === peer).length;
+    console.log(`Connection ${peer.id.slice(0, 8)} given up: ${why}; runs ended with it: ${owned}`);
+    release(peer);
+  }
+  // Hands a dropped connection, with its runs, terminal and tunnel, to the new socket, then replays what the client
+  // missed. The client replays its own side after `resumed`.
+  function resume(
+    peer: Peer,
+    { connectionId, key, received }: { connectionId: string; key: string; received: number },
+  ) {
+    const target = [...peers].find(
+      (candidate) => candidate.id === connectionId && candidate.resume,
+    );
+    const held = target?.resume;
+    const matches =
+      !!held &&
+      timingSafeEqual(
+        createHash('sha256').update(held.key).digest(),
+        createHash('sha256').update(key).digest(),
+      );
+    const frames = matches ? held.log.since(received) : null;
+    if (!target || !held || !frames) {
+      if (matches) expire(target!, 'its client lost track of the frames');
+      send(peer, {
+        type: 'connection.error',
+        code: 'resume_failed',
+        message: '网络中断太久或服务已重启，原来的运行已结束，请重新连接。',
+      });
+      peer.socket.close(4004, 'Resume failed');
+      return false;
+    }
+    clearTimeout(target.detached);
+    target.detached = undefined;
+    const previous = target.socket;
+    target.socket = peer.socket;
+    target.address = peer.address;
+    peers.delete(peer);
+    // Its close handler sees that it no longer belongs to the connection.
+    previous.terminate();
+    held.log.confirm(received);
+    peer.socket.send(
+      JSON.stringify({ type: 'resumed', connectionId, received: held.log.received }),
+    );
+    for (const frame of frames) peer.socket.send(frame);
+    if (terminal?.owner === target) terminal.process?.hold(false);
+    if (target.tunnel instanceof RelayTunnel) target.tunnel.recheck();
+    console.log(`Connection ${connectionId.slice(0, 8)} resumed; ${frames.length} frames replayed`);
+    return target;
   }
   function broadcast(message: ServerMessage, sessionId?: string) {
     for (const peer of peers) {
@@ -426,7 +509,7 @@ export function createProxyServer(options: ServerOptions) {
     if (!options.claude) throw new DomainError('native_unavailable', '离线模拟不启动原生终端。');
     if (terminal || runs.size || mutations.size)
       throw new DomainError('native_busy', '请先结束原生运行或会话管理，再打开终端。');
-    if (!peer.tunnel?.ssh) throw new DomainError('execution_offline', 'Windows SSH 尚未就绪。');
+    if (!peer.tunnel?.ssh) throw new DomainError('execution_offline', '本机 SSH 尚未就绪。');
     const current: Terminal = { id: randomUUID(), sessionId: command.sessionId, owner: peer };
     terminal = current;
     try {
@@ -435,11 +518,22 @@ export function createProxyServer(options: ServerOptions) {
       if (closing || peer.socket.readyState !== WebSocket.OPEN)
         throw new Error('Connection closed');
       completeOnboarding();
+      const cwd = prepareNativeDirectory(options.claude, store.directory, nativeRoot(session.id));
+      // Runs and terminals of a session share this directory, so the latest conversation may be either. Without one,
+      // `--continue` would end the CLI at once.
+      const continued =
+        !!command.continue &&
+        (await listSessions({ dir: cwd, limit: 1 }).then(
+          (found) => found.length > 0,
+          () => false,
+        ));
+      if (closing || peer.socket.readyState !== WebSocket.OPEN)
+        throw new Error('Connection closed');
       current.process = new NativeTerminal(
         options.claude.executable,
-        terminalArguments(options.claude, session, peer.tunnel.ssh),
+        terminalArguments(options.claude, session, peer.tunnel.ssh, continued),
         {
-          cwd: prepareNativeDirectory(options.claude, store.directory, nativeRoot(session.id)),
+          cwd,
           cols: command.cols,
           rows: command.rows,
           env: terminalEnvironment(options.claude),
@@ -616,7 +710,7 @@ export function createProxyServer(options: ServerOptions) {
     if (options.claude && !peer.tunnel?.ssh)
       throw new DomainError(
         'execution_offline',
-        'Windows SSH 尚未就绪，请通过桌面客户端重新建立连接。',
+        '本机 SSH 尚未就绪，请通过桌面客户端重新建立连接。',
       );
     peer.subscriptions.add(command.sessionId);
     const run: Run = {
@@ -658,7 +752,7 @@ export function createProxyServer(options: ServerOptions) {
       cancel(
         run,
         options.claude
-          ? '用户停止；已发出的 Windows SSH 命令可能继续执行，副作用未撤销，不能自动重试。'
+          ? '用户停止；已发出的 本机 SSH 命令可能继续执行，副作用未撤销，不能自动重试。'
           : '用户停止',
       );
       return;
@@ -810,8 +904,9 @@ export function createProxyServer(options: ServerOptions) {
     releases.current
       ? (({ version, size, sha256 }) => ({ version, size, sha256 }))(releases.current)
       : undefined;
-  // The first frame must authenticate; a desktop client also asks for its Windows tunnel here.
-  function authenticate(peer: Peer, value: unknown) {
+  // The first frame must authenticate; a desktop client also asks for its Windows tunnel here. Returns the
+  // connection the socket now serves, which is another one when it resumed.
+  function authenticate(peer: Peer, value: unknown): Peer | false {
     const auth = authSchema.safeParse(value);
     // Only a wrong token counts against the address: an outdated client holding the right one is not guessing.
     const token = (value as { token?: unknown } | null)?.token;
@@ -834,7 +929,16 @@ export function createProxyServer(options: ServerOptions) {
       peer.socket.close(4002, 'Version mismatch');
       return false;
     }
+    if (auth.data.resume) return resume(peer, auth.data.resume);
     peer.authenticated = true;
+    // Only the relay can wait for its desktop: an frp tunnel ends with its frpc connection.
+    const key =
+      auth.data.resumable &&
+      auth.data.tunnel &&
+      auth.data.tunnelTransport === 'relay' &&
+      options.tunnel
+        ? randomBytes(32).toString('base64url')
+        : undefined;
     send(peer, {
       type: 'ready',
       protocolVersion: PROTOCOL_VERSION,
@@ -845,21 +949,40 @@ export function createProxyServer(options: ServerOptions) {
       update: updates?.state,
       client: installer(),
       sessions: store.list(),
+      ...(key && { resume: { key, graceMs } }),
     });
+    if (key)
+      peer.resume = {
+        key,
+        log: new ResumeLog((received) => {
+          if (peer.socket.readyState === WebSocket.OPEN)
+            peer.socket.send(JSON.stringify({ type: 'resume.ack', received }));
+        }),
+      };
     if (auth.data.tunnel && options.tunnel) {
-      if (tunnelOwner) {
+      // A device that dropped and is waiting to come back gives way to a new sign-in, which is most likely the same
+      // desktop started again. Its relay tunnel shares nothing with the new one, so neither waits for the other.
+      const stale = tunnelOwner?.detached ? tunnelOwner : undefined;
+      if (stale) expire(stale, 'a new connection took the device');
+      if (tunnelOwner && tunnelOwner !== stale) {
         send(peer, {
           type: 'connection.error',
           code: 'device_busy',
-          message: '已有 Windows 设备连接或正在清理，请稍后重试。',
+          message: '已有桌面设备连接或正在清理，请稍后重试。',
         });
         peer.socket.close(4003, 'Device busy');
-        return true;
+        return peer;
       }
       tunnelOwner = peer;
-      peer.tunnel = new WindowsTunnel(options.tunnel, store.directory, peer.id, () => {
-        peer.socket.close(4003, 'Tunnel process closed');
-      });
+      const relay = auth.data.tunnelTransport === 'relay';
+      peer.tunnel = new (relay ? RelayTunnel : WindowsTunnel)(
+        options.tunnel,
+        store.directory,
+        peer.id,
+        () => {
+          peer.socket.close(4003, 'Tunnel process closed');
+        },
+      );
       track(
         peer.tunnel
           .start()
@@ -868,13 +991,34 @@ export function createProxyServer(options: ServerOptions) {
             send(peer, {
               type: 'connection.error',
               code: 'tunnel_failed',
-              message: 'frps 启动失败，请检查服务配置与端口。',
+              message: relay
+                ? '执行通道启动失败，请检查服务配置。'
+                : 'frps 启动失败，请检查服务配置与端口。',
             });
             peer.socket.close(4003, 'Tunnel failed');
           }),
         tunnelTasks,
       );
     }
+    return peer;
+  }
+  // A relay connection signs in with the secret its desktop received over the control connection. A wrong secret
+  // counts against the address like a wrong token.
+  function attachRelay(peer: Peer, attach: TunnelAttach) {
+    const owner = tunnelOwner;
+    if (
+      !owner ||
+      owner.id !== attach.connectionId ||
+      !(owner.tunnel instanceof RelayTunnel) ||
+      !owner.tunnel.matches(attach.secret)
+    ) {
+      refuse(peer.address);
+      peer.socket.close(4001, 'Unauthorized');
+      return false;
+    }
+    throttle.succeed(peer.address);
+    peer.relay = true;
+    if (!owner.tunnel.attach(peer.socket)) peer.socket.close(4008, 'Relay full');
     return true;
   }
   function registerTunnel(peer: Peer, credentials: TunnelCredentials) {
@@ -893,7 +1037,7 @@ export function createProxyServer(options: ServerOptions) {
           send(peer, {
             type: 'connection.error',
             code: 'ssh_failed',
-            message: 'Windows SSH / PowerShell 就绪探测失败。',
+            message: '本机 SSH / Shell 就绪探测失败。',
           });
           peer.socket.close(4003, 'SSH probe failed');
         }),
@@ -964,6 +1108,7 @@ export function createProxyServer(options: ServerOptions) {
   // Whatever the connection owned ends with it; nothing is replayed for a later connection.
   function release(peer: Peer) {
     peers.delete(peer);
+    peer.resume?.log.stop();
     if (login?.owner === peer) login.process.cancel();
     if (terminal?.owner === peer) {
       const task = terminal.process?.close();
@@ -988,7 +1133,8 @@ export function createProxyServer(options: ServerOptions) {
 
   wss.on('connection', (socket: WebSocket, address: string) => {
     void releases.refresh();
-    const peer: Peer = {
+    // Becomes the dropped connection when this socket resumes one.
+    let peer: Peer = {
       socket,
       id: randomUUID(),
       address,
@@ -1017,6 +1163,8 @@ export function createProxyServer(options: ServerOptions) {
     }, 15000);
     socket.on('error', () => socket.terminate());
     socket.on('message', (data, isBinary) => {
+      // A socket whose connection was resumed elsewhere may still hold frames; the new socket replays them.
+      if (peer.relay || peer.socket !== socket) return;
       let value: unknown;
       try {
         if (isBinary) throw new Error('Binary frame');
@@ -1031,11 +1179,24 @@ export function createProxyServer(options: ServerOptions) {
         return;
       }
       if (!peer.authenticated) {
-        if (authenticate(peer, value)) {
+        const attach = tunnelAttachSchema.safeParse(value);
+        const next = attach.success
+          ? attachRelay(peer, attach.data) && peer
+          : authenticate(peer, value);
+        if (next) {
+          peer = next;
           clearTimeout(authTimer);
           throttle.leave(address);
         }
         return;
+      }
+      if (peer.resume) {
+        const ack = resumeAckSchema.safeParse(value);
+        if (ack.success) {
+          peer.resume.log.confirm(ack.data.received);
+          return;
+        }
+        peer.resume.log.receive();
       }
       const credentials = tunnelCredentialsSchema.safeParse(value);
       if (credentials.success) {
@@ -1061,7 +1222,14 @@ export function createProxyServer(options: ServerOptions) {
     socket.on('close', (code) => {
       clearTimeout(authTimer);
       clearInterval(heartbeat);
-      if (!peer.authenticated) throttle.leave(address);
+      if (!peer.authenticated && !peer.relay) throttle.leave(address);
+      // A resumed connection moved on to another socket.
+      if (peer.socket !== socket) return;
+      // Anything but a deliberate close from a client that can come back leaves the connection waiting for it.
+      if (peer.resume && !peer.detached && !closing && code !== 1000) {
+        detach(peer);
+        return;
+      }
       // Why a connection ended is the first thing needed when a run was cut short.
       const owned = [...runs.values()].filter((run) => run.owner === peer).length;
       if (peer.authenticated && !closing)
@@ -1095,6 +1263,7 @@ export function createProxyServer(options: ServerOptions) {
       login?.process.cancel();
       const terminalCleanup = terminal?.process?.close();
       for (const run of runs.values()) cancel(run, '服务停止，运行未重放。');
+      for (const peer of peers) clearTimeout(peer.detached);
       const cleanup = [...peers].map((peer) => peer.tunnel?.close());
       for (const peer of peers) peer.socket.terminate();
       await Promise.all([...tasks]);

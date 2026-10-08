@@ -38,8 +38,14 @@ export type TerminalSpawner = (
   options: { cwd: string; cols: number; rows: number; env: Record<string, string>; name: string },
 ) => TerminalProcess;
 
-export function terminalArguments(options: ClaudeOptions, session: Session, ssh: SshConnection) {
+export function terminalArguments(
+  options: ClaudeOptions,
+  session: Session,
+  ssh: SshConnection,
+  continued = false,
+) {
   return [
+    ...(continued ? ['--continue'] : []),
     '--permission-mode',
     session.permissionMode === 'default' ? 'manual' : session.permissionMode,
     '--append-system-prompt',
@@ -55,6 +61,8 @@ export class NativeTerminal {
   process: TerminalProcess;
   outstanding = 0;
   paused = false;
+  // While the owning connection is away, unacknowledged output is no reason to end the terminal.
+  held = false;
   exited = false;
   closing = false;
   closed: Promise<void>;
@@ -93,9 +101,7 @@ export class NativeTerminal {
       if (this.outstanding >= 128 * 1024 && !this.paused) {
         this.paused = true;
         this.process.pause();
-        this.ackTimer = setTimeout(() => {
-          void this.close();
-        }, 30000);
+        this.awaitAck();
       }
     });
     this.process.onExit(({ exitCode }) => {
@@ -123,6 +129,17 @@ export class NativeTerminal {
       this.rows = rows;
       this.process.resize(cols, rows);
     }
+  }
+  // A client that stops acknowledging is gone; the terminal ends after 30 s without an answer.
+  private awaitAck() {
+    clearTimeout(this.ackTimer);
+    if (!this.held && this.paused && !this.closing)
+      this.ackTimer = setTimeout(() => void this.close(), 30000);
+  }
+  hold(held: boolean) {
+    this.held = held;
+    if (held) clearTimeout(this.ackTimer);
+    else this.awaitAck();
   }
   acknowledge(bytes: number) {
     if (bytes > this.outstanding) throw new Error('Invalid terminal acknowledgment');

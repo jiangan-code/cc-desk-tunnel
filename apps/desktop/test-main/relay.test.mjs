@@ -1,0 +1,369 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import { execFile } from 'node:child_process';
+import { X509Certificate, randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import { connect, createServer } from 'node:net';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { promisify } from 'node:util';
+import { WebSocket } from 'ws';
+import { PROTOCOL_VERSION } from '@cc-desk-tunnel/protocol';
+import { openProxyBridge } from '../electron/proxy-bridge.mjs';
+import { startLinuxTunnel } from '../electron/linux-tunnel.mjs';
+
+const execute = promisify(execFile);
+const linux = { skip: process.platform !== 'linux', timeout: 60000 };
+
+async function certificate(directory) {
+  const keyPath = join(directory, 'key.pem');
+  const certificatePath = join(directory, 'cert.pem');
+  await execute('openssl', [
+    'req',
+    '-x509',
+    '-newkey',
+    'ec',
+    '-pkeyopt',
+    'ec_paramgen_curve:prime256v1',
+    '-nodes',
+    '-days',
+    '1',
+    '-subj',
+    '/CN=localhost',
+    '-keyout',
+    keyPath,
+    '-out',
+    certificatePath,
+  ]);
+  return { cert: await readFile(certificatePath), key: await readFile(keyPath) };
+}
+// A native-mode service whose CLI is never started: sign-in, tunnel and relay are real.
+async function service(t, extra = {}) {
+  const { createProxyServer } = await import('../../server/src/server.ts');
+  const directory = await mkdtemp(join(tmpdir(), 'relay-test-'));
+  const tls = await certificate(directory);
+  const token = `relay-test-${randomUUID()}`;
+  const dataDir = join(directory, 'data');
+  const server = createProxyServer({
+    token,
+    dataDir,
+    tls,
+    claude: { executable: '/bin/false' },
+    tunnel: {
+      executable: '/nonexistent/frps',
+      publicHost: '127.0.0.1',
+      port: 1,
+      certificatePath: '',
+      keyPath: '',
+      serverName: 'localhost',
+    },
+    ...extra,
+  });
+  const url = (await server.listen(0)).replace('https:', 'wss:') + '/ws';
+  t.after(async () => {
+    await server.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+  return { url, token, dataDir, fingerprint: new X509Certificate(tls.cert).fingerprint256 };
+}
+function messages(socket) {
+  const received = [];
+  socket.on('message', (raw) => received.push(JSON.parse(raw.toString())));
+  return async (type) => {
+    const deadline = Date.now() + 20000;
+    while (Date.now() < deadline) {
+      const index = received.findIndex((message) => message.type === type);
+      if (index >= 0) return received.splice(index, 1)[0];
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    throw new Error(`Timed out waiting for ${type}: ${JSON.stringify(received)}`);
+  };
+}
+async function signIn(bridge, token) {
+  const local = new WebSocket(bridge.url);
+  const next = messages(local);
+  await new Promise((resolve, reject) => local.once('open', resolve).once('error', reject));
+  local.send(
+    JSON.stringify({ type: 'auth', protocolVersion: PROTOCOL_VERSION, token, deviceName: 'test' }),
+  );
+  return { local, next };
+}
+const ssh = (dataDir, connectionId, command) =>
+  execute(
+    'ssh',
+    ['-F', join(dataDir, 'connections', connectionId, 'ssh_config'), 'windows', command],
+    {
+      timeout: 20000,
+      maxBuffer: 16 * 1024 * 1024,
+      encoding: 'buffer',
+    },
+  );
+
+test(
+  'the Linux desktop is reached through the WSS relay, with no frp and no extra port',
+  linux,
+  async (t) => {
+    const { url, token, dataDir, fingerprint } = await service(t);
+    const bridge = await openProxyBridge({ url, fingerprint }, { schedulesPath: '/tmp/计划.json' });
+    t.after(() => bridge.close());
+    const { next } = await signIn(bridge, token);
+    // The bridge passes `ready` on only after the service probed SSH through the relay.
+    const ready = await next('ready');
+    assert.equal(ready.adapter, 'claude-code');
+    const connectionId = ready.connectionId;
+
+    const text = await ssh(dataDir, connectionId, "printf '中继 成功'; printf err >&2");
+    assert.equal(text.stdout.toString(), '中继 成功');
+    assert.equal(text.stderr.toString(), 'err');
+    await assert.rejects(ssh(dataDir, connectionId, 'exit 7'), (error) => error.code === 7);
+
+    // More concurrent commands than spare relay connections, and output well beyond the flow-control window.
+    const results = await Promise.all(
+      Array.from({ length: 6 }, (_, index) => ssh(dataDir, connectionId, `printf ${index}`)),
+    );
+    assert.deepEqual(
+      results.map((result) => result.stdout.toString()),
+      ['0', '1', '2', '3', '4', '5'],
+    );
+    const large = await ssh(dataDir, connectionId, 'head -c 8388608 /dev/zero | tr "\\0" a');
+    assert.equal(large.stdout.length, 8 * 1024 * 1024);
+    assert.equal(
+      large.stdout.every((byte) => byte === 0x61),
+      true,
+    );
+    const echoed = await new Promise((resolve, reject) => {
+      const child = execFile(
+        'ssh',
+        ['-F', join(dataDir, 'connections', connectionId, 'ssh_config'), 'windows', 'wc -c'],
+        { timeout: 20000 },
+        (error, stdout) => (error ? reject(error) : resolve(stdout.trim())),
+      );
+      child.stdin.end(Buffer.alloc(3 * 1024 * 1024, 1));
+    });
+    assert.equal(echoed, String(3 * 1024 * 1024));
+
+    await bridge.close();
+    const deadline = Date.now() + 5000;
+    while (existsSync(join(dataDir, 'connections', connectionId)) && Date.now() < deadline)
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(existsSync(join(dataDir, 'connections', connectionId)), false);
+
+    // The device slot is free again for the next connection.
+    const again = await openProxyBridge({ url, fingerprint }, {});
+    t.after(() => again.close());
+    assert.equal((await (await signIn(again, token)).next('ready')).adapter, 'claude-code');
+  },
+);
+
+test('relay connections without the right secret are refused and counted', linux, async (t) => {
+  const { url, token, fingerprint } = await service(t);
+  const bridge = await openProxyBridge({ url, fingerprint }, {});
+  t.after(() => bridge.close());
+  const { connectionId } = await (await signIn(bridge, token)).next('ready');
+  for (const attach of [
+    { type: 'tunnel.attach', connectionId, secret: 'A'.repeat(43) },
+    { type: 'tunnel.attach', connectionId: randomUUID(), secret: 'A'.repeat(43) },
+  ]) {
+    const socket = new WebSocket(url, { rejectUnauthorized: false });
+    await new Promise((resolve, reject) => socket.once('open', resolve).once('error', reject));
+    socket.send(JSON.stringify(attach));
+    assert.equal(await new Promise((resolve) => socket.once('close', resolve)), 4001);
+  }
+});
+
+test('a cancelled Linux tunnel start leaves nothing running', linux, async () => {
+  await assert.rejects(
+    startLinuxTunnel({ connectionId: 'x', secret: 'x' }, {}, AbortSignal.abort(), () => {}),
+    /abort/i,
+  );
+});
+
+// A TCP forwarder between the bridge and the service. `drop()` cuts every connection through it and refuses new ones
+// until `restore()`, like a network outage: neither end gets a close frame.
+async function outage(t, target) {
+  const { hostname, port } = new URL(target);
+  const sockets = new Set();
+  let down = false;
+  const server = createServer((client) => {
+    if (down) return client.destroy();
+    const upstream = connect(Number(port), hostname);
+    for (const socket of [client, upstream]) {
+      sockets.add(socket);
+      socket.on('error', () => {});
+      socket.once('close', () => sockets.delete(socket));
+    }
+    client.once('close', () => upstream.destroy());
+    upstream.once('close', () => client.destroy());
+    client.pipe(upstream);
+    upstream.pipe(client);
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => {
+    for (const socket of sockets) socket.destroy();
+    server.close();
+  });
+  return {
+    url: `wss://127.0.0.1:${server.address().port}/ws`,
+    drop() {
+      down = true;
+      for (const socket of sockets) socket.destroy();
+    },
+    restore() {
+      down = false;
+    },
+  };
+}
+// A plain signed-in client of the same service, whose changes reach every connection.
+async function observer(url, token) {
+  const socket = new WebSocket(url, { rejectUnauthorized: false });
+  const next = messages(socket);
+  await new Promise((resolve, reject) => socket.once('open', resolve).once('error', reject));
+  socket.send(
+    JSON.stringify({
+      type: 'auth',
+      protocolVersion: PROTOCOL_VERSION,
+      token,
+      deviceName: 'observer',
+    }),
+  );
+  await next('ready');
+  return socket;
+}
+const createSession = (socket, title) =>
+  socket.send(
+    JSON.stringify({
+      type: 'session.create',
+      requestId: randomUUID(),
+      title,
+      projectPath: '/tmp',
+    }),
+  );
+
+test(
+  'a network drop is resumed: the same connection and tunnel, nothing lost either way',
+  linux,
+  async (t) => {
+    const { url, token, dataDir, fingerprint } = await service(t);
+    const network = await outage(t, url);
+    const bridge = await openProxyBridge({ url: network.url, fingerprint }, {});
+    t.after(() => bridge.close());
+    const { local, next } = await signIn(bridge, token);
+    const ready = await next('ready');
+    assert.equal(ready.resume, undefined, 'the resume key stays in the bridge');
+    const { connectionId } = ready;
+    assert.equal((await ssh(dataDir, connectionId, 'printf before')).stdout.toString(), 'before');
+    // Commands share one SSH connection.
+    assert.equal(existsSync(join(dataDir, 'connections', connectionId, 'cm')), true);
+
+    const other = await observer(url, token);
+    t.after(() => other.close());
+    network.drop();
+    assert.equal((await next('connection.state')).state, 'reconnecting');
+    // Both directions while the network is down: a change made elsewhere, a request from this client, and a
+    // command Claude starts, which waits for the desktop instead of failing.
+    createSession(other, '断网期间别处创建');
+    const requestId = randomUUID();
+    local.send(
+      JSON.stringify({
+        type: 'session.create',
+        requestId,
+        title: '断网期间本机创建',
+        projectPath: '/tmp',
+      }),
+    );
+    const during = ssh(dataDir, connectionId, 'printf during');
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    network.restore();
+
+    assert.equal((await next('connection.state')).state, 'connected');
+    const titles = [
+      (await next('session.updated')).session.title,
+      (await next('session.updated')).session.title,
+    ].sort();
+    assert.deepEqual(titles, ['断网期间别处创建', '断网期间本机创建'].sort());
+    const response = await next('response');
+    assert.equal(response.requestId, requestId);
+    assert.equal(response.ok, true);
+    assert.equal((await during).stdout.toString(), 'during');
+    assert.equal((await ssh(dataDir, connectionId, 'printf after')).stdout.toString(), 'after');
+
+    // Leaving on purpose ends the connection at once, without a grace period.
+    await bridge.close();
+    const deadline = Date.now() + 5000;
+    while (existsSync(join(dataDir, 'connections', connectionId)) && Date.now() < deadline)
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(existsSync(join(dataDir, 'connections', connectionId)), false);
+  },
+);
+
+test(
+  'a connection not back within the grace period is given up on both sides',
+  linux,
+  async (t) => {
+    const { url, token, dataDir, fingerprint } = await service(t, { resumeGraceMs: 1500 });
+    const network = await outage(t, url);
+    let closed = false;
+    const bridge = await openProxyBridge(
+      { url: network.url, fingerprint },
+      {},
+      () => (closed = true),
+    );
+    t.after(() => bridge.close());
+    const { next } = await signIn(bridge, token);
+    const { connectionId } = await next('ready');
+    network.drop();
+    assert.equal((await next('connection.state')).state, 'reconnecting');
+    const error = await next('connection.error');
+    assert.match(error.message, /网络中断/);
+    const deadline = Date.now() + 5000;
+    while (
+      (!closed || existsSync(join(dataDir, 'connections', connectionId))) &&
+      Date.now() < deadline
+    )
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(closed, true);
+    assert.equal(existsSync(join(dataDir, 'connections', connectionId)), false);
+  },
+);
+
+test(
+  'a new sign-in takes over a device that dropped instead of being told it is busy',
+  linux,
+  async (t) => {
+    const { url, token, fingerprint } = await service(t);
+    const network = await outage(t, url);
+    const dropped = await openProxyBridge({ url: network.url, fingerprint }, {});
+    t.after(() => dropped.close());
+    const first = await signIn(dropped, token);
+    await first.next('ready');
+    network.drop();
+    assert.equal((await first.next('connection.state')).state, 'reconnecting');
+
+    const again = await openProxyBridge({ url, fingerprint }, {});
+    t.after(() => again.close());
+    assert.equal((await (await signIn(again, token)).next('ready')).adapter, 'claude-code');
+    // The dropped one learns its connection is gone once the network is back.
+    network.restore();
+    assert.equal((await first.next('connection.error')).code, 'tunnel_failed');
+  },
+);
+
+test('resuming an unknown connection is refused', linux, async (t) => {
+  const { url, token } = await service(t);
+  const socket = new WebSocket(url, { rejectUnauthorized: false });
+  const next = messages(socket);
+  const closed = new Promise((resolve) => socket.once('close', resolve));
+  await new Promise((resolve, reject) => socket.once('open', resolve).once('error', reject));
+  socket.send(
+    JSON.stringify({
+      type: 'auth',
+      protocolVersion: PROTOCOL_VERSION,
+      token,
+      deviceName: 'test',
+      resume: { connectionId: randomUUID(), key: 'A'.repeat(43), received: 0 },
+    }),
+  );
+  assert.equal((await next('connection.error')).code, 'resume_failed');
+  assert.equal(await closed, 4004);
+});
