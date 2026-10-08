@@ -26,11 +26,11 @@ export const TERMINAL_RESET =
 // Puts the user's own terminal in raw mode and joins it to a native Claude Code terminal of the session: keys go up
 // as `terminal.input`, the size follows SIGWINCH, and output is acknowledged once the local terminal took it, which
 // is the service's flow control. `exited` settles with the CLI's exit code, or rejects when the terminal could not
-// open or the connection dropped.
+// open or the connection dropped. `continued` picks up the session's latest conversation.
 export function attachTerminal(
   connection,
   sessionId,
-  { input = process.stdin, output = process.stdout } = {},
+  { input = process.stdin, output = process.stdout, continued = false } = {},
 ) {
   let id = null;
   let pendingBytes = 0;
@@ -105,7 +105,7 @@ export function attachTerminal(
     }
   });
   connection
-    .request({ type: 'terminal.open', sessionId, ...initial })
+    .request({ type: 'terminal.open', sessionId, ...initial, ...(continued && { continue: true }) })
     .catch((error) => finish(error));
   connection.closed.then((reason) => finish(new Error(reason ?? '连接已断开。')));
   return {

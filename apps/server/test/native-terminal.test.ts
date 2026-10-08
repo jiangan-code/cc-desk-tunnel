@@ -114,6 +114,16 @@ test('control terminal launches the official CLI directly with remote guidance a
   assert.ok(args.includes('provider'));
   assert.ok(args.includes('high'));
   assert.ok(!args.includes('--resume') && !args.includes('--session-id'));
+  assert.ok(!args.includes('--continue'));
+  assert.equal(
+    terminalArguments(
+      { executable: 'claude' },
+      { projectPath: '/home/user', permissionMode: 'auto' } as Session,
+      { configPath: '/ssh', powershellPath: '/bin/bash' } as never,
+      true,
+    )[0],
+    '--continue',
+  );
   assert.ok(
     !args.some((arg) => arg.includes('bypass') || arg.includes('mcp') || arg.includes('sdk-ts')),
   );

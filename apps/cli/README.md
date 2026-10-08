@@ -4,12 +4,12 @@
 
 ```bash
 cd ~/code/myproject
-ccdt               # 接着这个目录最近的会话；没有就新建
-ccdt -n            # 新建会话
+ccdt               # 接着这个目录最近的对话；没有就新建
+ccdt -n            # 新建会话，从空白对话开始
 ccdt ~/other -m opus --effort high --permission-mode plan
 ```
 
-Claude 账号登录、`/resume`、`/config` 等都在终端里用原版斜杠命令完成。退出 Claude Code（`/exit` 或两次 Ctrl+C）即断开连接并回收本机隧道。
+接着的是这个目录的会话里最近的一段原生对话（`claude --continue`），在图形界面里聊的也算。要换一段用 `/resume`，要从空白开始用 `/clear` 或 `ccdt -n`。Claude 账号登录、`/config` 等都在终端里用原版斜杠命令完成。退出 Claude Code（`/exit` 或两次 Ctrl+C）即断开连接并回收本机隧道。
 
 ## 安装与登录
 

@@ -9,6 +9,7 @@ import {
   deleteSession,
   forkSession,
   getSessionMessages,
+  listSessions,
   renameSession,
 } from '@anthropic-ai/claude-agent-sdk';
 import {
@@ -517,11 +518,22 @@ export function createProxyServer(options: ServerOptions) {
       if (closing || peer.socket.readyState !== WebSocket.OPEN)
         throw new Error('Connection closed');
       completeOnboarding();
+      const cwd = prepareNativeDirectory(options.claude, store.directory, nativeRoot(session.id));
+      // Runs and terminals of a session share this directory, so the latest conversation may be either. Without one,
+      // `--continue` would end the CLI at once.
+      const continued =
+        !!command.continue &&
+        (await listSessions({ dir: cwd, limit: 1 }).then(
+          (found) => found.length > 0,
+          () => false,
+        ));
+      if (closing || peer.socket.readyState !== WebSocket.OPEN)
+        throw new Error('Connection closed');
       current.process = new NativeTerminal(
         options.claude.executable,
-        terminalArguments(options.claude, session, peer.tunnel.ssh),
+        terminalArguments(options.claude, session, peer.tunnel.ssh, continued),
         {
-          cwd: prepareNativeDirectory(options.claude, store.directory, nativeRoot(session.id)),
+          cwd,
           cols: command.cols,
           rows: command.rows,
           env: terminalEnvironment(options.claude),
