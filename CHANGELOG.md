@@ -4,7 +4,9 @@
 
 ## 未发布
 
-- Linux 终端客户端 `ccdt`：在系统终端里直接使用远端原版 Claude Code，复用桌面客户端的连接桥与隧道，服务端无需改动。见 [apps/cli](apps/cli/README.md)。
+- Linux 终端客户端 `ccdt`：在系统终端里直接使用远端原版 Claude Code，复用桌面客户端的连接桥与执行通道。见 [apps/cli](apps/cli/README.md)。deb 包自带 `/usr/bin/ccdt`，由包内 Electron 运行。
+- Linux 客户端的执行通道改走 WSS 中继：不再需要 frpc 和公网 7000 端口，nginx 配置不变。Windows 客户端仍用 frp。**协议升到 12，服务端与所有客户端需一起升级。**
+- 服务端生成的 SSH 配置关闭 OpenSSH 10.1+ 对非后量子密钥交换的逐条警告（连接始终在已验证的 TLS 内），避免它混入每条命令的输出。
 
 ## 0.2.5
 

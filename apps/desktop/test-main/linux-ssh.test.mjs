@@ -7,7 +7,6 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import ssh2 from 'ssh2';
 import { startLinuxSsh } from '../electron/linux-ssh.mjs';
-import { startLinuxTunnel } from '../electron/linux-tunnel.mjs';
 import { pathKey, withProject, folderName, isInside } from '../src/paths.ts';
 const execute = promisify(execFile);
 
@@ -96,35 +95,6 @@ test(
 );
 
 test(
-  'missing frpc and pre-cancelled Linux startup clean up without hanging',
-  { skip: process.platform !== 'linux' },
-  async () => {
-    const configuration = {
-      serverAddr: 'localhost',
-      serverPort: 7000,
-      remotePort: 12345,
-      connectionId: 'test',
-      certificate: 'test',
-      token: 'test',
-      serverName: 'test',
-    };
-    await assert.rejects(
-      startLinuxTunnel(
-        configuration,
-        { frpc: '/missing/frpc' },
-        new AbortController().signal,
-        () => {},
-      ),
-      /ENOENT/,
-    );
-    await assert.rejects(
-      startLinuxTunnel(configuration, {}, AbortSignal.abort(), () => {}),
-      /abort/i,
-    );
-  },
-);
-
-test(
   'closing Linux SSH kills an active command process group and releases the listener',
   { skip: process.platform !== 'linux' },
   async (t) => {
@@ -149,78 +119,5 @@ test(
     assert.ok(pid > 0);
     await server.close();
     assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
-  },
-);
-
-test(
-  'real frp TLS tunnel registers Linux credentials and executes desktop Bash',
-  {
-    skip: process.platform !== 'linux' || !process.env.FRPS_TEST_PATH,
-    timeout: 30000,
-  },
-  async (t) => {
-    const { WindowsTunnel, availablePort } = await import('../../server/src/tunnel.ts');
-    const { tunnelCredentialsSchema } = await import('@cc-desk-tunnel/protocol');
-    const { randomUUID } = await import('node:crypto');
-    const directory = await mkdtemp(join(tmpdir(), 'linux-frp-test-'));
-    const certificatePath = join(directory, 'cert.pem');
-    const keyPath = join(directory, 'key.pem');
-    let desktop, remote;
-    t.after(async () => {
-      await desktop?.close();
-      await remote?.close();
-      await rm(directory, { recursive: true, force: true });
-    });
-    await execute('openssl', [
-      'req',
-      '-x509',
-      '-newkey',
-      'rsa:2048',
-      '-nodes',
-      '-days',
-      '1',
-      '-subj',
-      '/CN=localhost',
-      '-addext',
-      'subjectAltName=DNS:localhost',
-      '-keyout',
-      keyPath,
-      '-out',
-      certificatePath,
-    ]);
-    const failures = [];
-    remote = new WindowsTunnel(
-      {
-        executable: process.env.FRPS_TEST_PATH,
-        publicHost: '127.0.0.1',
-        bindHost: '127.0.0.1',
-        port: await availablePort(),
-        certificatePath,
-        keyPath,
-        serverName: 'localhost',
-      },
-      directory,
-      randomUUID(),
-      () => failures.push('frps exited'),
-    );
-    desktop = await startLinuxTunnel(
-      await remote.start(),
-      {
-        frpc: new URL('../vendor/frpc', import.meta.url).pathname,
-        schedulesPath: '/tmp/桌面/schedules.json',
-      },
-      new AbortController().signal,
-      (error) => failures.push(error),
-    );
-    await remote.accept(tunnelCredentialsSchema.parse(desktop.credentials));
-    assert.equal(remote.ssh.platform, 'linux');
-    const result = await execute('ssh', [
-      '-F',
-      remote.ssh.configPath,
-      'windows',
-      "printf 'Linux 隧道成功'",
-    ]);
-    assert.equal(result.stdout, 'Linux 隧道成功');
-    assert.deepEqual(failures, []);
   },
 );

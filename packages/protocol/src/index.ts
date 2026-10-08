@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-export const PROTOCOL_VERSION = 11;
+export const PROTOCOL_VERSION = 12;
 export const MAX_FRAME_BYTES = 256 * 1024;
 const id = z.uuid();
 const timestamp = z.iso.datetime();
@@ -471,8 +471,20 @@ export const authSchema = z
     token: z.string().min(24).max(512),
     deviceName: z.string().trim().min(1).max(120),
     tunnel: z.boolean().default(false),
+    // How the service reaches the desktop's SSH endpoint: through frp and its own port, or relayed over further WSS
+    // connections the desktop opens to this service, which needs neither.
+    tunnelTransport: z.enum(['frp', 'relay']).default('frp'),
   })
   .strict();
+// The per-connection secret that admits the desktop's relay connections.
+const relaySecret = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
+// The first and only protocol frame of a relay connection. The service answers with RELAY_BEGIN when it hands the
+// connection an SSH connection; from then on it carries that connection's bytes as binary frames.
+export const tunnelAttachSchema = z
+  .object({ type: z.literal('tunnel.attach'), connectionId: id, secret: relaySecret })
+  .strict();
+export type TunnelAttach = z.infer<typeof tunnelAttachSchema>;
+export const RELAY_BEGIN = JSON.stringify({ type: 'tunnel.begin' });
 export const serverMessageSchema = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('ready'),
@@ -537,6 +549,7 @@ export const serverMessageSchema = z.discriminatedUnion('type', [
     certificate: z.string().min(1),
     serverName: z.string().min(1),
   }),
+  z.object({ type: z.literal('tunnel.relay'), connectionId: id, secret: relaySecret }),
   z.object({ type: z.literal('tunnel.ready'), connectionId: id }),
 ]);
 export type ServerMessage = z.infer<typeof serverMessageSchema>;

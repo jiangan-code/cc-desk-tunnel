@@ -1,7 +1,3 @@
-import { access, constants } from 'node:fs/promises';
-import { delimiter, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
-
 // The proxy for a service address in the PAC form the bridge reads ("PROXY host:port" or "DIRECT"), taken from the
 // usual https_proxy / all_proxy / no_proxy variables. Only plain HTTP proxies are used, as on the desktop.
 export function environmentProxy(target, env = process.env) {
@@ -24,29 +20,4 @@ export function environmentProxy(target, env = process.env) {
   } catch {
     return 'DIRECT';
   }
-}
-
-// frpc from, in order: an explicit path, a copy next to this client, the source tree's prepared vendor directory,
-// the installed desktop package, then PATH.
-export async function findFrpc(env = process.env) {
-  const candidates = [
-    env.PROXY_FRPC_PATH,
-    fileURLToPath(new URL('../vendor/frpc', import.meta.url)),
-    fileURLToPath(new URL('../../desktop/vendor/frpc', import.meta.url)),
-    '/opt/CC Desk Tunnel/resources/vendor/frpc',
-    ...(env.PATH ?? '')
-      .split(delimiter)
-      .filter(Boolean)
-      .map((directory) => join(directory, 'frpc')),
-  ];
-  for (const candidate of candidates) {
-    if (!candidate) continue;
-    try {
-      await access(candidate, constants.X_OK);
-      return candidate;
-    } catch {}
-  }
-  throw new Error(
-    '找不到 frpc。请在源码目录运行 npm run prepare:linux，或用 PROXY_FRPC_PATH 指定。',
-  );
 }
