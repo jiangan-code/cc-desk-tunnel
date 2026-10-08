@@ -14,6 +14,8 @@ import { openProxyBridge } from '../electron/proxy-bridge.mjs';
 import { startLinuxTunnel } from '../electron/linux-tunnel.mjs';
 
 const execute = promisify(execFile);
+// The daemon tests must not put notifications on the desktop.
+process.env.CCDT_NOTIFY = '0';
 const linux = { skip: process.platform !== 'linux', timeout: 60000 };
 
 async function certificate(directory) {

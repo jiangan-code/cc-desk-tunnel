@@ -8,6 +8,7 @@
 - Linux 客户端的执行通道改走 WSS 中继：不再需要 frpc 和公网 7000 端口，nginx 配置不变。Windows 客户端仍用 frp。**协议升到 12，服务端与所有客户端需一起升级。**
 - Linux 客户端（桌面与 `ccdt`）断线续接：网络中断后，运行、终端和执行通道在服务端保留 3 分钟；连接桥自动重连，双方补发中断期间漏掉的消息，界面只是暂停一下。中断期间 Claude 发起的命令会等到重连后再执行。超过 3 分钟则与此前一样结束运行。主动退出不保留。
 - Linux 客户端的远程命令复用同一条 SSH 连接：每条命令不再重新握手，经远端服务时由约 1.5 秒降到约 0.4 秒，大输出吞吐约翻倍。
+- `ccdt` worktree 隔离：列表里按 `w` 为当前仓库新建 git worktree 并在其中开 agent，删除会话时一并清理（有未提交改动时拒绝）；列表按仓库分组并显示分支。agent 开始等你时发桌面通知。见 [apps/cli](apps/cli/README.md#worktree-隔离)。
 - `ccdt` 后台常驻：`ccdt daemon install` 装成 systemd 用户服务，持有连接和执行通道；关掉终端 agent 照常运行，任何终端里再运行 `ccdt` 都能接回。见 [apps/cli](apps/cli/README.md#后台常驻)。
 - `ccdt` 多 agent：在 Claude Code 里按 Ctrl+Q 回到 agent 列表，agent 在服务端继续运行。列表按项目分组，显示运行中 / 等你 / 空闲，可以进入、新建、结束、删除、改名和搜索；看不到的 agent 等你时响铃并显示在窗口标题上。服务端允许不同会话的终端同时运行（每台设备最多 8 个），再次进入时还原整屏画面。见 [apps/cli](apps/cli/README.md#多个-agent)。
 - `ccdt` 重新打开时接着这个目录最近的一段对话（`claude --continue`），不再每次都是新对话；`-n` 从空白开始。
