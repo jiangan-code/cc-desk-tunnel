@@ -468,3 +468,85 @@ test(
     await state((list) => list.length === 1);
   },
 );
+
+test(
+  'the background daemon keeps agents running between terminals and hands them to the next one',
+  linux,
+  async (t) => {
+    const { openConnection } = await import('../../cli/src/connection.mjs');
+    const { startDaemon, unitFile } = await import('../../cli/src/daemon.mjs');
+    const directory = await mkdtemp(join(tmpdir(), 'daemon-'));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const executable = join(directory, 'claude');
+    await writeFile(executable, FAKE_CLI);
+    await chmod(executable, 0o755);
+    const { url, token, fingerprint } = await service(t, { claude: { executable } });
+    const socketPath = join(directory, 'ccdt.sock');
+    const daemon = await startDaemon({ url, fingerprint, token, socketPath }, () => {});
+    t.after(() => daemon.stop());
+    await assert.rejects(
+      startDaemon({ url, fingerprint, token, socketPath }, () => {}),
+      /已在运行/,
+      'one daemon per socket',
+    );
+
+    const view = async () => {
+      const connection = await openConnection(`ws+unix://${socketPath}:/`, null);
+      const frames = [];
+      connection.onMessage((message) => frames.push(message));
+      const next = async (accept) => {
+        for (let waited = 0; waited < 20000; waited += 10) {
+          const index = frames.findIndex(accept);
+          if (index >= 0) return frames.splice(index, 1)[0];
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        throw new Error(`Timed out: ${JSON.stringify(frames)}`);
+      };
+      return { connection, next };
+    };
+    const first = await view();
+    const { sessionId } = await first.connection.request({
+      type: 'session.create',
+      title: '后台',
+      projectPath: directory,
+    });
+    await first.connection.request({ type: 'terminal.open', sessionId, cols: 80, rows: 24 });
+    const { terminalId } = await first.next((m) => m.type === 'terminal.opened');
+    let seen = '';
+    while (!/fake-cli ready/.test(seen))
+      seen += (await first.next((m) => m.type === 'terminal.data')).data;
+    first.connection.control({ type: 'terminal.input', sessionId, terminalId, data: 'hello\r' });
+    while (!/got hello/.test(seen))
+      seen += (await first.next((m) => m.type === 'terminal.data')).data;
+
+    // The first terminal goes away; the agent stays, no longer shown.
+    first.connection.close();
+    const second = await view();
+    assert.ok(
+      second.connection.ready.sessions.some((session) => session.id === sessionId),
+      'a new view starts from the sessions as they are now',
+    );
+    await second.connection.request({ type: 'terminal.list' });
+    await second.next(
+      (m) =>
+        m.type === 'terminals.state' &&
+        m.terminals.some((item) => item.terminalId === terminalId && !item.attached),
+    );
+    await second.connection.request({ type: 'terminal.open', sessionId, cols: 80, rows: 24 });
+    assert.equal((await second.next((m) => m.type === 'terminal.opened')).terminalId, terminalId);
+    const snapshot = await second.next(
+      (m) => m.type === 'terminal.data' && m.data.startsWith('\x1b[?25h'),
+    );
+    assert.match(snapshot.data, /got hello/);
+    second.connection.close();
+
+    assert.match(
+      unitFile({
+        execPath: '/opt/CC Desk Tunnel/cc-desk-tunnel',
+        script: '/opt/x/ccdt.mjs',
+        env: { ELECTRON_RUN_AS_NODE: '1' },
+      }),
+      /Environment=ELECTRON_RUN_AS_NODE=1\nExecStart="\/opt\/CC Desk Tunnel\/cc-desk-tunnel" "\/opt\/x\/ccdt.mjs" daemon run/,
+    );
+  },
+);

@@ -3,7 +3,8 @@ import { WebSocket } from 'ws';
 import { MAX_FRAME_BYTES, PROTOCOL_VERSION, serverMessageSchema } from '@cc-desk-tunnel/protocol';
 
 // A protocol connection through the local bridge: authenticates, waits for `ready`, then offers request/response
-// commands and the terminal frames. Resolves with the connection once the service and the tunnel are ready.
+// commands and the terminal frames. Resolves with the connection once the service and the tunnel are ready. Through
+// the background daemon (`token` null) there is nothing to sign in: the daemon sends `ready` at once.
 export function openConnection(url, token, { timeoutMs = 60000 } = {}) {
   const socket = new WebSocket(url, { maxPayload: MAX_FRAME_BYTES });
   const pending = new Map();
@@ -54,15 +55,18 @@ export function openConnection(url, token, { timeoutMs = 60000 } = {}) {
       failure = '连接服务超时。';
       socket.terminate();
     }, timeoutMs);
-    socket.on('open', () =>
-      socket.send(
-        JSON.stringify({
-          type: 'auth',
-          protocolVersion: PROTOCOL_VERSION,
-          token,
-          deviceName: 'Linux terminal',
-        }),
-      ),
+    socket.on(
+      'open',
+      () =>
+        token === null ||
+        socket.send(
+          JSON.stringify({
+            type: 'auth',
+            protocolVersion: PROTOCOL_VERSION,
+            token,
+            deviceName: 'Linux terminal',
+          }),
+        ),
     );
     socket.on('message', (raw) => {
       let message;

@@ -6,6 +6,15 @@ import { effortSchema, permissionModeSchema } from '@cc-desk-tunnel/protocol';
 import { controlTlsOptions, openProxyBridge } from '../../desktop/electron/proxy-bridge.mjs';
 import { clearConfig, configDirectory, desktopLogin, loadConfig, saveConfig } from './config.mjs';
 import { openConnection } from './connection.mjs';
+import {
+  daemonRunning,
+  daemonSocket,
+  daemonStatus,
+  installDaemon,
+  startDaemon,
+  stopDaemon,
+  uninstallDaemon,
+} from './daemon.mjs';
 import { environmentProxy } from './environment.mjs';
 import manifest from '../package.json' with { type: 'json' };
 import { Deck } from './deck.mjs';
@@ -14,6 +23,8 @@ import { attachTerminal, TERMINAL_RESET } from './terminal.mjs';
 const USAGE = `用法：
   ccdt [目录]            在目录（默认当前目录）上打开远端原版 Claude Code
   ccdt deck [目录]       先打开 agent 列表
+  ccdt daemon install    装成 systemd 用户服务：关掉终端 agent 也继续运行
+  ccdt daemon status | stop | uninstall
   ccdt login             保存服务地址、证书指纹和服务凭据
   ccdt logout            删除保存的连接信息
   ccdt --help | --version
@@ -27,7 +38,8 @@ const USAGE = `用法：
 login 选项：--url <wss://…> --fingerprint <SHA256> --token-stdin（从标准输入读凭据）
 
 在 Claude Code 里按 Ctrl+Q 回到 agent 列表，agent 在服务端继续运行；列表里可以进入、新建、结束
-和搜索 agent，有 agent 等你时会响铃并显示在窗口标题上。退出 ccdt 会结束全部 agent。
+和搜索 agent，有 agent 等你时会响铃并显示在窗口标题上。后台服务运行时，退出 ccdt 或关掉终端
+agent 照常运行，任何终端里再运行 ccdt 都能接回；没有后台服务时，退出 ccdt 会结束全部 agent。
 
 环境变量：CCDT_TOKEN 覆盖保存的凭据；https_proxy / no_proxy 设定代理。
 同一服务同时只接受一台执行设备；桌面客户端已连接时会提示忙。`;
@@ -66,6 +78,7 @@ export async function main(argv) {
       console.log((await clearConfig()) ? '已删除保存的连接信息。' : '没有保存的连接信息。');
       return 0;
     }
+    if (positionals[0] === 'daemon') return await daemon(positionals[1]);
     const deck = positionals[0] === 'deck';
     if (deck) positionals.shift();
     if (positionals.length > 1) throw new UsageError('只能指定一个目录。');
@@ -159,6 +172,51 @@ function askSecret(question) {
   });
 }
 
+async function daemon(command) {
+  if (command === 'run') {
+    const config = await loadConfig();
+    if (!config?.token)
+      throw new Error('没有可用的服务配置或凭据（密钥环可能已锁定）；请先运行 ccdt login。');
+    const handle = await startDaemon({
+      ...config,
+      resolveProxy: async (target) => environmentProxy(target),
+    });
+    // systemd stops the daemon with SIGTERM; that ends the agents.
+    for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP'])
+      process.once(signal, () => void handle.stop().then(() => process.exit(0)));
+    throw new Error((await handle.ended) ?? '与服务的连接已结束。');
+  }
+  if (command === 'install') {
+    if (!(await loadConfig())?.token) throw new Error('请先运行 ccdt login。');
+    const path = await installDaemon();
+    console.log(`已安装并启动后台服务：${path}`);
+    console.log(
+      '之后运行 ccdt 会连到它；关掉终端 agent 也继续运行。日志：journalctl --user -u ccdt',
+    );
+    console.log('桌面会话退出后也要保持运行，可以执行：loginctl enable-linger');
+    return 0;
+  }
+  if (command === 'uninstall') {
+    await uninstallDaemon();
+    console.log('已停止并移除后台服务。');
+    return 0;
+  }
+  if (command === 'stop') {
+    await stopDaemon();
+    console.log('后台服务已停止，它运行的 agent 都已结束；对话都保留。');
+    return 0;
+  }
+  if (command === 'status') {
+    const state = await daemonStatus();
+    const answering = await daemonRunning();
+    console.log(
+      answering ? `后台服务运行中（${state}），${daemonSocket()}` : `后台服务未运行（${state}）。`,
+    );
+    return answering ? 0 : 3;
+  }
+  throw new UsageError('daemon 子命令：install / status / stop / uninstall / run');
+}
+
 async function run(directory, values) {
   if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error('需要在交互式终端里运行。');
   const permissionMode = values['permission-mode'];
@@ -170,13 +228,17 @@ async function run(directory, values) {
     throw new Error(`目录不存在：${directory}`);
   });
   if (!(await stat(projectPath)).isDirectory()) throw new Error(`不是目录：${projectPath}`);
+  // With the background daemon running, this ccdt is only a view: agents outlive it.
+  const background = await daemonRunning();
   const config = await loadConfig();
-  if (!config) throw new Error('尚未配置服务，请先运行 ccdt login。');
-  if (!config.token)
-    throw new Error('找不到服务凭据（密钥环可能已锁定）；请运行 ccdt login 或设置 CCDT_TOKEN。');
+  if (!background) {
+    if (!config) throw new Error('尚未配置服务，请先运行 ccdt login。');
+    if (!config.token)
+      throw new Error('找不到服务凭据（密钥环可能已锁定）；请运行 ccdt login 或设置 CCDT_TOKEN。');
+  }
 
   // Signals end ccdt: before the connection stands they stop the attempt; after, they close the connection, which
-  // ends the agents and lets the steps below clean up the terminal.
+  // ends the agents (without the daemon) and lets the steps below clean up the terminal.
   const abort = new AbortController();
   let connection, bridge;
   const stop = () => (connection ? connection.close() : abort.abort());
@@ -184,15 +246,20 @@ async function run(directory, values) {
   for (const signal of signals) process.on(signal, stop);
   let deck;
   try {
-    status(`连接 ${new URL(config.url).host} …`);
-    bridge = await openProxyBridge(
-      { url: config.url, fingerprint: config.fingerprint },
-      { resolveProxy: async (target) => environmentProxy(target) },
-    );
-    abort.signal.throwIfAborted();
-    status('建立本机执行通道 …');
+    if (background) status('连接后台服务 …');
+    else {
+      status(`连接 ${new URL(config.url).host} …`);
+      bridge = await openProxyBridge(
+        { url: config.url, fingerprint: config.fingerprint },
+        { resolveProxy: async (target) => environmentProxy(target) },
+      );
+      abort.signal.throwIfAborted();
+      status('建立本机执行通道 …');
+    }
     connection = await Promise.race([
-      openConnection(bridge.url, config.token),
+      background
+        ? openConnection(`ws+unix://${daemonSocket()}:/`, null)
+        : openConnection(bridge.url, config.token),
       new Promise((_, reject) =>
         abort.signal.addEventListener('abort', () => reject(new Error('已取消。'))),
       ),
@@ -201,7 +268,11 @@ async function run(directory, values) {
       throw new Error('服务运行在离线模拟模式，没有原生终端。');
     let lost = null;
     connection.closed.then((reason) => (lost = reason ?? '连接已断开。'));
-    deck = new Deck(connection, { cwd: projectPath, host: new URL(config.url).host });
+    deck = new Deck(connection, {
+      cwd: projectPath,
+      host: config?.url ? new URL(config.url).host : '',
+      background,
+    });
     await connection.request({ type: 'terminal.list' });
     let attached = false;
     // A network drop pauses everything until the bridge has the connection back. The list says so on its message
