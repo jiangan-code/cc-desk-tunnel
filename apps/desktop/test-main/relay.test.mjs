@@ -4,7 +4,7 @@ import { execFile } from 'node:child_process';
 import { X509Certificate, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { connect, createServer } from 'node:net';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -367,3 +367,104 @@ test('resuming an unknown connection is refused', linux, async (t) => {
   assert.equal((await next('connection.error')).code, 'resume_failed');
   assert.equal(await closed, 4004);
 });
+
+// A stand-in for the CLI in a native terminal: it reports its state through the hook address like the real hooks do.
+const FAKE_CLI = `#!/bin/bash
+post() { curl -fsS -m 2 -o /dev/null -X POST "$CC_DESK_TUNNEL_HOOK/$1"; }
+echo "fake-cli ready"
+post idle
+while IFS= read -r line; do
+  case "$line" in
+    ask) post waiting; echo "asking you";;
+    quit) exit 3;;
+    *) echo "got $line";;
+  esac
+done
+`;
+async function until(next, type, accept) {
+  for (;;) {
+    const message = await next(type);
+    if (accept(message)) return message;
+  }
+}
+
+test(
+  'several agents run at once, report their state, and show their screen again when reopened',
+  linux,
+  async (t) => {
+    const directory = await mkdtemp(join(tmpdir(), 'fake-cli-'));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const executable = join(directory, 'claude');
+    await writeFile(executable, FAKE_CLI);
+    await chmod(executable, 0o755);
+    const { url, token, fingerprint } = await service(t, { claude: { executable } });
+    const bridge = await openProxyBridge({ url, fingerprint }, {});
+    t.after(() => bridge.close());
+    const { local, next } = await signIn(bridge, token);
+    await next('ready');
+    const request = async (command) => {
+      const requestId = randomUUID();
+      local.send(JSON.stringify({ ...command, requestId }));
+      const response = await until(next, 'response', (message) => message.requestId === requestId);
+      assert.equal(response.ok, true, response.message);
+      return response;
+    };
+    const create = (title) => request({ type: 'session.create', title, projectPath: directory });
+    const first = (await create('一号')).sessionId;
+    const second = (await create('二号')).sessionId;
+    const screen = (terminalId) => {
+      let text = '';
+      return async (expected) => {
+        while (!expected.test(text))
+          text += (await until(next, 'terminal.data', (m) => m.terminalId === terminalId)).data;
+        return text;
+      };
+    };
+    const state = (accept) => until(next, 'terminals.state', (m) => accept(m.terminals));
+
+    await request({ type: 'terminal.open', sessionId: first, cols: 80, rows: 24 });
+    const { terminalId: one } = await until(next, 'terminal.opened', (m) => m.sessionId === first);
+    await screen(one)(/fake-cli ready/);
+    await state((list) => list.some((item) => item.terminalId === one && item.status === 'idle'));
+    local.send(
+      JSON.stringify({ type: 'terminal.input', sessionId: first, terminalId: one, data: 'ask\r' }),
+    );
+    await state((list) =>
+      list.some((item) => item.terminalId === one && item.status === 'waiting'),
+    );
+
+    // Leaving it: it keeps running while the other one starts.
+    await request({ type: 'terminal.detach', sessionId: first, terminalId: one });
+    await request({ type: 'terminal.open', sessionId: second, cols: 80, rows: 24 });
+    const { terminalId: two } = await until(next, 'terminal.opened', (m) => m.sessionId === second);
+    const both = await state(
+      (list) => list.length === 2 && list.some((item) => item.terminalId === two),
+    );
+    assert.equal(both.terminals.find((item) => item.terminalId === one).attached, false);
+
+    // Opening the first again draws its screen as it was.
+    await request({ type: 'terminal.open', sessionId: first, cols: 100, rows: 30 });
+    const again = await until(next, 'terminal.opened', (m) => m.sessionId === first);
+    assert.equal(again.terminalId, one, 'the same running terminal');
+    // Output sent before the detach may still be queued; the screen starts with the clearing sequence.
+    const snapshot = await until(
+      next,
+      'terminal.data',
+      (m) => m.terminalId === one && m.data.startsWith('\x1b[?25h'),
+    );
+    assert.match(snapshot.data, /fake-cli ready/);
+    assert.match(snapshot.data, /asking you/);
+
+    local.send(
+      JSON.stringify({
+        type: 'terminal.input',
+        sessionId: second,
+        terminalId: two,
+        data: 'quit\r',
+      }),
+    );
+    const closed = await until(next, 'terminal.closed', (m) => m.terminalId === two);
+    assert.equal(closed.exitCode, 3);
+    await state((list) => list.length === 1);
+  },
+);

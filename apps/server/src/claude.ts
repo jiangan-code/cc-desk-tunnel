@@ -76,6 +76,38 @@ export function nativeDirectory(dataDir: string, sessionId: string) {
   return join(dataDir, 'native', sessionId);
 }
 
+// A native terminal's CLI reports what it is doing through hooks in its directory's local settings. The command
+// posts to the address in CC_DESK_TUNNEL_HOOK, which only terminals get, so for runs it does nothing. A permission
+// prompt or question is `waiting`; the end of a turn is `idle`; a prompt or a finished tool is `busy` again.
+const HOOK_VARIABLE = 'CC_DESK_TUNNEL_HOOK';
+const hookCommand = (status: string) =>
+  `[ -z "$${HOOK_VARIABLE}" ] || curl -fsS -m 2 -o /dev/null -X POST "$${HOOK_VARIABLE}/${status}" >/dev/null 2>&1; exit 0`;
+const statusHooks: Record<string, { matcher?: string; status: string }> = {
+  SessionStart: { status: 'idle' },
+  UserPromptSubmit: { status: 'busy' },
+  PostToolUse: { matcher: '*', status: 'busy' },
+  Notification: { matcher: 'permission_prompt|elicitation_dialog', status: 'waiting' },
+  Stop: { status: 'idle' },
+};
+type HookGroup = { matcher?: string; hooks?: { type?: string; command?: string }[] };
+// Replaces this service's hooks and keeps any the user added to the directory.
+export function withStatusHooks(settings: { hooks?: Record<string, HookGroup[]> }) {
+  const hooks: Record<string, HookGroup[]> = {};
+  for (const [event, groups] of Object.entries(settings.hooks ?? {})) {
+    const kept = groups.filter(
+      (group) => !group.hooks?.some((hook) => hook.command?.includes(HOOK_VARIABLE)),
+    );
+    if (kept.length) hooks[event] = kept;
+  }
+  for (const [event, { matcher, status }] of Object.entries(statusHooks))
+    hooks[event] = [
+      ...(hooks[event] ?? []),
+      { ...(matcher && { matcher }), hooks: [{ type: 'command', command: hookCommand(status) }] },
+    ];
+  return { ...settings, hooks };
+}
+export const hookEnvironment = (address: string) => ({ [HOOK_VARIABLE]: address });
+
 export function prepareNativeDirectory(options: ClaudeOptions, dataDir: string, sessionId: string) {
   const cwd = nativeDirectory(dataDir, sessionId);
   mkdirSync(cwd, { recursive: true, mode: 0o700 });
@@ -86,7 +118,9 @@ export function prepareNativeDirectory(options: ClaudeOptions, dataDir: string, 
     ? JSON.parse(readFileSync(localSettingsPath, 'utf8'))
     : {};
   settings.cleanupPeriodDays = options.contextRetentionDays ?? 3650;
-  writeFileSync(localSettingsPath, JSON.stringify(settings, null, 2) + '\n', { mode: 0o600 });
+  writeFileSync(localSettingsPath, JSON.stringify(withStatusHooks(settings), null, 2) + '\n', {
+    mode: 0o600,
+  });
   return cwd;
 }
 

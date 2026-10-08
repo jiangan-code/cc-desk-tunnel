@@ -399,6 +399,12 @@ export const commandSchema = z.discriminatedUnion('type', [
   z
     .object({ type: z.literal('terminal.close'), ...request, sessionId: id, terminalId: id })
     .strict(),
+  // Stops showing a terminal while its CLI keeps running; `terminal.open` on the session shows it again.
+  z
+    .object({ type: z.literal('terminal.detach'), ...request, sessionId: id, terminalId: id })
+    .strict(),
+  // Asks for `terminals.state`.
+  z.object({ type: z.literal('terminal.list'), ...request }).strict(),
   z
     .object({
       type: z.literal('session.subscribe'),
@@ -502,6 +508,19 @@ export const tunnelAttachSchema = z
   .strict();
 export type TunnelAttach = z.infer<typeof tunnelAttachSchema>;
 export const RELAY_BEGIN = JSON.stringify({ type: 'tunnel.begin' });
+// What a native terminal's CLI is doing, as its hooks report it: working, waiting for an answer (a permission or a
+// question), or done with its turn. `starting` until the CLI first reports.
+export const terminalStatusSchema = z.enum(['starting', 'busy', 'waiting', 'idle']);
+export type TerminalStatus = z.infer<typeof terminalStatusSchema>;
+export const terminalInfoSchema = z.object({
+  terminalId: id,
+  sessionId: id,
+  status: terminalStatusSchema,
+  // Whether a client is showing it.
+  attached: z.boolean(),
+  since: timestamp,
+});
+export type TerminalInfo = z.infer<typeof terminalInfoSchema>;
 export const serverMessageSchema = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('ready'),
@@ -547,6 +566,11 @@ export const serverMessageSchema = z.discriminatedUnion('type', [
     sessionId: id,
     terminalId: id,
     exitCode: z.number().int().nullable(),
+  }),
+  // The terminals this connection runs, sent whenever one starts, ends, changes state or is shown or hidden.
+  z.object({
+    type: z.literal('terminals.state'),
+    terminals: z.array(terminalInfoSchema),
   }),
   // Every version must keep reading this frame: with code `version_mismatch` it is how a client of another
   // protocol version learns the service's version and the installer it may fetch.
