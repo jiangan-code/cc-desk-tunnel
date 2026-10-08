@@ -16,7 +16,12 @@ export type TunnelOptions = {
   serverName: string;
   bindHost?: string;
 };
-export type SshConnection = { configPath: string; powershellPath: string };
+export type SshConnection = {
+  configPath: string;
+  powershellPath: string;
+  platform?: 'win32' | 'linux';
+  schedulesPath?: string;
+};
 
 export async function availablePort() {
   const server = createServer();
@@ -47,11 +52,14 @@ async function reachable(port: number) {
     });
   });
 }
-export function sshProbe(configPath: string, powershellPath: string) {
+export function sshProbe(configPath: string, powershellPath: string, platform = 'win32') {
   const script =
     "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); Write-Output 'CC_DESK_TUNNEL_SSH_READY'; exit 0";
   const encoded = Buffer.from(script, 'utf16le').toString('base64');
-  const command = `"${powershellPath.replaceAll('"', '')}" -NoLogo -NoProfile -NonInteractive -EncodedCommand ${encoded}`;
+  const command =
+    platform === 'linux'
+      ? 'printf CC_DESK_TUNNEL_SSH_READY'
+      : `"${powershellPath.replaceAll('"', '')}" -NoLogo -NoProfile -NonInteractive -EncodedCommand ${encoded}`;
   return new Promise<void>((resolve, reject) => {
     execFile(
       'ssh',
@@ -180,9 +188,14 @@ export class WindowsTunnel {
     for (let attempt = 0; attempt < 20; attempt++) {
       if (this.controller.signal.aborted) throw new Error('Tunnel closed');
       try {
-        await sshProbe(configPath, credentials.powershellPath);
+        await sshProbe(configPath, credentials.powershellPath, credentials.platform);
         if (this.controller.signal.aborted) throw new Error('Tunnel closed');
-        this.ssh = { configPath, powershellPath: credentials.powershellPath };
+        this.ssh = {
+          configPath,
+          powershellPath: credentials.powershellPath,
+          platform: credentials.platform,
+          schedulesPath: credentials.schedulesPath,
+        };
         return;
       } catch {
         await delay(300, undefined, { signal: this.controller.signal });

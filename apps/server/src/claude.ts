@@ -37,6 +37,18 @@ export type ClaudeRun = {
 };
 // `sessionId` is the proxy's name for the session, which a scheduled task needs to continue it.
 export function remotePrompt(projectPath: string, ssh: SshConnection, sessionId: string) {
+  if (ssh.platform === 'linux')
+    return [
+      'The user projects are on the connected Linux desktop, NOT this agent host.',
+      `Project cwd on the desktop: ${JSON.stringify(projectPath)}. Shell: /bin/bash. Encoding: UTF-8.`,
+      `Use native Bash to run ssh -F ${JSON.stringify(ssh.configPath)} windows '<remote command>'. The alias windows is retained for compatibility and targets the Linux desktop.`,
+      'Use SSH for ALL project reads, edits, searches and commands. Never fall back to files on this agent host.',
+      `Begin remote scripts with cd -- '${projectPath.replaceAll("'", "'\\''")}' && ...; quote shell arguments safely.`,
+      'SSH uses a temporary identity and pinned host key. Never disclose or copy the private key.',
+      'Each command has a separate Bash session. Keep long-running commands attached to a background native Bash task; ordinary child processes are stopped when the SSH channel closes. Do not daemonize them.',
+      'After interruption, report unknown results and never automatically retry side effects.',
+      `Scheduled prompts are managed by the desktop. Edit its ${JSON.stringify(ssh.schedulesPath)} via SSH, using the JSON format documented in its 说明 field. Do not use cron on this host. Session ID: ${sessionId}.`,
+    ].join('\n');
   return [
     'The user and all their projects are on the connected Windows computer, NOT on this Linux host.',
     `Windows project cwd: ${JSON.stringify(projectPath)}. Shell: PowerShell 7. Encoding: UTF-8.`,

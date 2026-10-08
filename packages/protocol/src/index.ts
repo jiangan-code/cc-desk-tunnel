@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-export const PROTOCOL_VERSION = 10;
+export const PROTOCOL_VERSION = 11;
 export const MAX_FRAME_BYTES = 256 * 1024;
 const id = z.uuid();
 const timestamp = z.iso.datetime();
@@ -553,6 +553,8 @@ export const tunnelCredentialsSchema = z
     privateKey: z.string().min(1).max(16384),
     hostPublicKey: z.string().regex(/^ssh-ed25519 [A-Za-z0-9+/=]+$/),
     powershellPath: z.string().min(1).max(2048),
+    platform: z.enum(['win32', 'linux']).optional(),
+    schedulesPath: z.string().min(1).max(4096).optional(),
   })
   .strict();
 export type TunnelCredentials = z.infer<typeof tunnelCredentialsSchema>;

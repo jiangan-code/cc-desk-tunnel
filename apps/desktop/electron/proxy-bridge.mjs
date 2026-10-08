@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { WebSocket, WebSocketServer } from 'ws';
 import { serverMessageSchema, MAX_FRAME_BYTES } from '@cc-desk-tunnel/protocol';
+import { startLinuxTunnel } from './linux-tunnel.mjs';
 import { startWindowsTunnel } from './windows-tunnel.mjs';
 import { httpProxy, openSocket } from './system-proxy.mjs';
 
@@ -117,7 +118,7 @@ export async function openProxyBridge(
     let verified = false;
     let nativeReady;
     let configurationReceived = false;
-    const timer = setTimeout(() => fail('Windows SSH 连接准备超时。'), 45000);
+    const timer = setTimeout(() => fail('本机 SSH 连接准备超时。'), 45000);
     function fail(message) {
       if (local.readyState === WebSocket.OPEN)
         local.send(JSON.stringify({ type: 'connection.error', code: 'tunnel_failed', message }));
@@ -142,6 +143,7 @@ export async function openProxyBridge(
         if (message.type?.startsWith('tunnel.')) throw new Error('Renderer tunnel message');
         if (message.type === 'auth') {
           message.tunnel = true;
+          message.deviceName = process.platform === 'linux' ? 'Linux desktop' : 'Windows desktop';
           token = String(message.token);
         }
         if (verified && remote.readyState === WebSocket.OPEN) remote.send(JSON.stringify(message));
@@ -170,7 +172,12 @@ export async function openProxyBridge(
           return;
         }
         configurationReceived = true;
-        current.preparing = startWindowsTunnel(message, binaries, current.controller.signal, fail)
+        current.preparing = (process.platform === 'linux' ? startLinuxTunnel : startWindowsTunnel)(
+          message,
+          binaries,
+          current.controller.signal,
+          fail,
+        )
           .then((tunnel) => {
             current.tunnel = tunnel;
             if (!closed && remote.readyState === WebSocket.OPEN)
