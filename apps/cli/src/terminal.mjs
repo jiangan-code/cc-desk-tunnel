@@ -23,10 +23,17 @@ export function* inputFrames(text, size = 4096) {
 export const TERMINAL_RESET =
   '\x1b[?25h\x1b[?2004l\x1b[?1004l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[<u\x1b[?1049l';
 
+// Ctrl+Q leaves a terminal running and returns to the list: as a control byte, or as the kitty keyboard protocol
+// and xterm's modifyOtherKeys encode it when the CLI switched those on.
+export const DETACH_KEY = /\x11|\x1b\[113;5(?::\d+)?u|\x1b\[27;5;113~/;
+
 // Puts the user's own terminal in raw mode and joins it to a native Claude Code terminal of the session: keys go up
 // as `terminal.input`, the size follows SIGWINCH, and output is acknowledged once the local terminal took it, which
 // is the service's flow control. `exited` settles with the CLI's exit code, or rejects when the terminal could not
 // open or the connection dropped. `continued` picks up the session's latest conversation.
+//
+// `exited` settles with `{ code }` when the CLI ended, or `{ detached: true }` after Ctrl+Q or `detach()`, when the
+// CLI runs on in the service.
 export function attachTerminal(
   connection,
   sessionId,
@@ -55,9 +62,12 @@ export function attachTerminal(
   };
   const onInput = (chunk) => {
     if (!id) return;
-    const text = typeof chunk === 'string' ? chunk : decoder.write(chunk);
+    let text = typeof chunk === 'string' ? chunk : decoder.write(chunk);
+    const key = DETACH_KEY.exec(text);
+    if (key) text = text.slice(0, key.index);
     for (const data of inputFrames(text))
       connection.control({ type: 'terminal.input', sessionId, terminalId: id, data });
+    if (key) detach();
   };
   const onResize = () => {
     if (!id) return;
@@ -66,9 +76,14 @@ export function attachTerminal(
     size = `${cols}:${rows}`;
     connection.control({ type: 'terminal.resize', sessionId, terminalId: id, cols, rows });
   };
+  function detach() {
+    if (finished || !id) return;
+    void connection.request({ type: 'terminal.detach', sessionId, terminalId: id }).catch(() => {});
+    finish(null, { detached: true });
+  }
   const requestClose = () =>
     connection.request({ type: 'terminal.close', sessionId, terminalId: id }).catch(() => {});
-  function finish(error, code) {
+  function finish(error, result) {
     if (finished) return;
     finished = true;
     clearTimeout(ackTimer);
@@ -80,7 +95,7 @@ export function attachTerminal(
       input.pause();
     }
     if (error) rejectExited(error);
-    else resolveExited(code);
+    else resolveExited(result);
   }
   const unsubscribe = connection.onTerminal((message) => {
     if (message.sessionId !== sessionId || finished) return;
@@ -101,7 +116,7 @@ export function attachTerminal(
         else ackTimer ??= setTimeout(acknowledge, 20);
       });
     } else if (message.type === 'terminal.closed' && message.terminalId === id) {
-      finish(null, message.exitCode);
+      finish(null, { code: message.exitCode });
     }
   });
   connection
@@ -110,6 +125,7 @@ export function attachTerminal(
   connection.closed.then((reason) => finish(new Error(reason ?? '连接已断开。')));
   return {
     exited,
+    detach,
     // Ends the remote CLI; `exited` settles when the service reports it closed.
     close() {
       if (finished || closeRequested) return;

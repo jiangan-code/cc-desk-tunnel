@@ -8,10 +8,12 @@ import { clearConfig, configDirectory, desktopLogin, loadConfig, saveConfig } fr
 import { openConnection } from './connection.mjs';
 import { environmentProxy } from './environment.mjs';
 import manifest from '../package.json' with { type: 'json' };
+import { Deck } from './deck.mjs';
 import { attachTerminal, TERMINAL_RESET } from './terminal.mjs';
 
 const USAGE = `用法：
   ccdt [目录]            在目录（默认当前目录）上打开远端原版 Claude Code
+  ccdt deck [目录]       先打开 agent 列表
   ccdt login             保存服务地址、证书指纹和服务凭据
   ccdt logout            删除保存的连接信息
   ccdt --help | --version
@@ -24,8 +26,11 @@ const USAGE = `用法：
 
 login 选项：--url <wss://…> --fingerprint <SHA256> --token-stdin（从标准输入读凭据）
 
+在 Claude Code 里按 Ctrl+Q 回到 agent 列表，agent 在服务端继续运行；列表里可以进入、新建、结束
+和搜索 agent，有 agent 等你时会响铃并显示在窗口标题上。退出 ccdt 会结束全部 agent。
+
 环境变量：CCDT_TOKEN 覆盖保存的凭据；https_proxy / no_proxy 设定代理。
-同一服务同时只运行一个原生终端或运行；桌面客户端占用时会提示忙。`;
+同一服务同时只接受一台执行设备；桌面客户端已连接时会提示忙。`;
 
 const status = (text) => process.stderr.write(`\r\x1b[2K\x1b[2m${text}\x1b[0m`);
 const clearStatus = () => process.stderr.write('\r\x1b[2K');
@@ -61,8 +66,10 @@ export async function main(argv) {
       console.log((await clearConfig()) ? '已删除保存的连接信息。' : '没有保存的连接信息。');
       return 0;
     }
+    const deck = positionals[0] === 'deck';
+    if (deck) positionals.shift();
     if (positionals.length > 1) throw new UsageError('只能指定一个目录。');
-    return await run(positionals[0] ?? '.', values);
+    return await run(positionals[0] ?? '.', { ...values, deck });
   } catch (error) {
     clearStatus();
     console.error(
@@ -168,13 +175,14 @@ async function run(directory, values) {
   if (!config.token)
     throw new Error('找不到服务凭据（密钥环可能已锁定）；请运行 ccdt login 或设置 CCDT_TOKEN。');
 
-  // Until the terminal is attached, Ctrl+C and hang-ups stop the connection attempt and clean up the SSH endpoint.
+  // Signals end ccdt: before the connection stands they stop the attempt; after, they close the connection, which
+  // ends the agents and lets the steps below clean up the terminal.
   const abort = new AbortController();
-  let terminal;
-  const stop = () => (terminal ? terminal.close() : abort.abort());
+  let connection, bridge;
+  const stop = () => (connection ? connection.close() : abort.abort());
   const signals = ['SIGINT', 'SIGTERM', 'SIGHUP'];
   for (const signal of signals) process.on(signal, stop);
-  let bridge, connection;
+  let deck;
   try {
     status(`连接 ${new URL(config.url).host} …`);
     bridge = await openProxyBridge(
@@ -191,27 +199,57 @@ async function run(directory, values) {
     ]);
     if (connection.ready.adapter !== 'claude-code')
       throw new Error('服务运行在离线模拟模式，没有原生终端。');
-    // A network drop pauses everything until the bridge has the connection back. Before the terminal is attached
-    // the status line says so; after, the window title does, as the screen belongs to Claude Code.
+    let lost = null;
+    connection.closed.then((reason) => (lost = reason ?? '连接已断开。'));
+    deck = new Deck(connection, { cwd: projectPath, host: new URL(config.url).host });
+    await connection.request({ type: 'terminal.list' });
+    let attached = false;
+    // A network drop pauses everything until the bridge has the connection back. The list says so on its message
+    // line; an agent's screen belongs to Claude Code, so there the window title does.
     connection.onState((state) => {
       const reconnecting = state === 'reconnecting';
-      if (!terminal) status(reconnecting ? '网络中断，正在重连 …' : '已重新连接 …');
-      else
+      if (attached)
         process.stdout.write(`\x1b]2;${reconnecting ? 'ccdt：网络中断，正在重连…' : 'ccdt'}\x07`);
+      else if (deck.shown) deck.notice(reconnecting ? '网络中断，正在重连…' : '已重新连接。');
+      else status(reconnecting ? '网络中断，正在重连 …' : '已重新连接 …');
     });
-    const session = await chooseSession(connection, projectPath, values);
-    abort.signal.throwIfAborted();
-    clearStatus();
-    terminal = attachTerminal(connection, session.id, { continued: !values.new });
-    let code;
-    try {
-      code = await terminal.exited;
-    } catch (error) {
-      process.stdout.write(TERMINAL_RESET);
-      throw error;
+    let next = null;
+    if (!values.deck) {
+      const session = await chooseSession(connection, projectPath, values);
+      next = { sessionId: session.id, continued: !values.new };
     }
-    return code ?? 0;
+    clearStatus();
+    let message = '';
+    for (;;) {
+      if (!next) {
+        next = await deck.choose(message);
+        if (next.lost) throw new Error(next.lost);
+        if (next.quit) return 0;
+      }
+      const title = deck.sessions.get(next.sessionId)?.title ?? '';
+      deck.attached = next.sessionId;
+      attached = true;
+      const terminal = attachTerminal(connection, next.sessionId, { continued: next.continued });
+      let result;
+      try {
+        result = await terminal.exited;
+      } catch (error) {
+        if (lost) throw error;
+        result = { error: error.message };
+      } finally {
+        attached = false;
+        deck.attached = null;
+        process.stdout.write(TERMINAL_RESET + '\x1b[H\x1b[2J');
+      }
+      message = result.error
+        ? `无法打开「${title}」：${result.error}`
+        : result.detached
+          ? ''
+          : `「${title}」已退出${result.code ? `（代码 ${result.code}）` : ''}。按 Enter 可以接着这段对话。`;
+      next = null;
+    }
   } finally {
+    deck?.hide();
     for (const signal of signals) process.off(signal, stop);
     connection?.close();
     await bridge?.close();

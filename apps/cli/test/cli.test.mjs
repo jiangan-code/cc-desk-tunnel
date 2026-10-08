@@ -8,6 +8,7 @@ import { clearConfig, desktopLogin, loadConfig, saveConfig } from '../src/config
 import { environmentProxy } from '../src/environment.mjs';
 import { chooseSession } from '../src/main.mjs';
 import { attachTerminal, inputFrames } from '../src/terminal.mjs';
+import { Deck, cellWidth, deckRows, fit } from '../src/deck.mjs';
 
 const SESSION = '11111111-1111-4111-8111-111111111111';
 const TERMINAL = '22222222-2222-4222-8222-222222222222';
@@ -110,6 +111,7 @@ function fakeConnection(sessions = []) {
     request: async (command) => (requests.push(command), { ok: true, sessionId: SESSION }),
     control: (message) => sent.push(message),
     onTerminal: (listener) => (listeners.add(listener), () => listeners.delete(listener)),
+    onMessage: (listener) => (listeners.add(listener), () => listeners.delete(listener)),
   };
 }
 function fakeTty() {
@@ -122,7 +124,7 @@ function fakeTty() {
   output.columns = 500;
   output.rows = 40;
   output.written = '';
-  output.write = (text, done) => ((output.written += text), queueMicrotask(done));
+  output.write = (text, done) => ((output.written += text), done && queueMicrotask(done));
   return { input, output };
 }
 
@@ -181,7 +183,7 @@ test('terminal joins the local tty to the remote CLI and restores it on exit', a
     terminalId: TERMINAL,
     exitCode: 3,
   });
-  assert.equal(await terminal.exited, 3);
+  assert.deepEqual(await terminal.exited, { code: 3 });
   assert.deepEqual(tty.input.raw, [true, false]);
   assert.equal(tty.input.listenerCount('data'), 0);
 });
@@ -220,4 +222,113 @@ test('the directory resumes its latest session unless a new one is asked for', a
     title: 'p',
     projectPath: '/p',
   });
+});
+
+test('Ctrl+Q leaves the agent running: input before it is sent, the terminal is detached', async () => {
+  const connection = fakeConnection();
+  const tty = fakeTty();
+  const terminal = attachTerminal(connection, SESSION, tty);
+  connection.emit({ type: 'terminal.opened', sessionId: SESSION, terminalId: TERMINAL });
+  tty.input.emit('data', Buffer.from('ls\x11rest'));
+  assert.deepEqual(await terminal.exited, { detached: true });
+  assert.deepEqual(
+    connection.sent.map((message) => message.data),
+    ['ls'],
+  );
+  assert.deepEqual(connection.requests.at(-1), {
+    type: 'terminal.detach',
+    sessionId: SESSION,
+    terminalId: TERMINAL,
+  });
+  // The kitty keyboard protocol's encoding of the same key, when the CLI switched it on.
+  const kitty = fakeTty();
+  const again = attachTerminal(connection, SESSION, kitty);
+  connection.emit({ type: 'terminal.opened', sessionId: SESSION, terminalId: TERMINAL });
+  kitty.input.emit('data', Buffer.from('\x1b[113;5u'));
+  assert.deepEqual(await again.exited, { detached: true });
+});
+
+test('the agent list fits wide text, groups by directory and puts running agents first', () => {
+  assert.equal(cellWidth('ab中文'), 6);
+  assert.equal(fit('中文标题很长', 7), '中文.. ');
+  assert.equal(cellWidth(fit('中文标题很长', 7)), 7);
+  assert.equal(fit('ab', 4), 'ab  ');
+  const at = (minutes) => new Date(Date.UTC(2026, 9, 8, 12, minutes)).toISOString();
+  const session = (id, projectPath, title, minutes) => ({
+    id,
+    projectPath,
+    title,
+    updatedAt: at(minutes),
+  });
+  const sessions = [
+    session('a', '/home/u/old', '旧项目', 1),
+    session('b', '/home/u/web', '网站', 5),
+    session('c', '/home/u/web', '网站修复', 2),
+  ];
+  const terminals = new Map([['c', { sessionId: 'c', status: 'busy', since: at(3) }]]);
+  const rows = deckRows(sessions, terminals, '', '/home/u');
+  assert.deepEqual(
+    rows.map((row) => row.header ?? row.session.id),
+    ['~/web', 'c', 'b', '~/old', 'a'],
+  );
+  assert.deepEqual(
+    deckRows(sessions, terminals, '修复', '/home/u').map((row) => row.header ?? row.session.id),
+    ['~/web', 'c'],
+  );
+});
+
+test('the agent list opens, ends and leaves agents with confirmation', async () => {
+  const sessions = [
+    { id: SESSION, projectPath: '/p', title: 'one', updatedAt: new Date().toISOString() },
+  ];
+  const connection = fakeConnection(sessions);
+  const tty = fakeTty();
+  const deck = new Deck(connection, { ...tty, cwd: '/p', home: '/home/u' });
+  connection.emit({
+    type: 'terminals.state',
+    terminals: [
+      {
+        terminalId: TERMINAL,
+        sessionId: SESSION,
+        status: 'busy',
+        attached: false,
+        since: new Date().toISOString(),
+      },
+    ],
+  });
+  let chosen = deck.choose();
+  assert.match(tty.output.written, /运行中/);
+  tty.input.emit('data', Buffer.from('\r'));
+  assert.deepEqual(await chosen, { sessionId: SESSION, continued: true });
+
+  // An agent out of sight that starts waiting rings.
+  tty.output.written = '';
+  connection.emit({
+    type: 'terminals.state',
+    terminals: [
+      {
+        terminalId: TERMINAL,
+        sessionId: SESSION,
+        status: 'waiting',
+        attached: false,
+        since: new Date().toISOString(),
+      },
+    ],
+  });
+  assert.match(tty.output.written, /\x07/);
+  assert.match(tty.output.written, /1 个等你/);
+
+  chosen = deck.choose();
+  tty.input.emit('data', Buffer.from('dy'));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(connection.requests.at(-1), {
+    type: 'terminal.close',
+    sessionId: SESSION,
+    terminalId: TERMINAL,
+  });
+  // Leaving with an agent running asks first; anything but y keeps the list.
+  tty.input.emit('data', Buffer.from('qn'));
+  assert.equal(deck.shown, true);
+  tty.input.emit('data', Buffer.from('qy'));
+  assert.deepEqual(await chosen, { quit: true });
 });

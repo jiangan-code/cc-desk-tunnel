@@ -9,6 +9,7 @@ export function openConnection(url, token, { timeoutMs = 60000 } = {}) {
   const pending = new Map();
   const listeners = new Set();
   const stateListeners = new Set();
+  const messageListeners = new Set();
   let ready = null;
   let failure = null;
   let resolveClosed;
@@ -33,6 +34,11 @@ export function openConnection(url, token, { timeoutMs = 60000 } = {}) {
     onTerminal(listener) {
       listeners.add(listener);
       return () => listeners.delete(listener);
+    },
+    // Every service frame but responses: session and terminal list changes among them.
+    onMessage(listener) {
+      messageListeners.add(listener);
+      return () => messageListeners.delete(listener);
     },
     // 'reconnecting' while the bridge takes the service connection back after a network drop, then 'connected'.
     onState(listener) {
@@ -82,7 +88,10 @@ export function openConnection(url, token, { timeoutMs = 60000 } = {}) {
         pending.delete(message.requestId);
         if (message.ok) request.resolve(message);
         else request.reject(new Error(message.message ?? message.code ?? '请求失败。'));
-      } else if (message.type === 'connection.state') {
+        return;
+      }
+      for (const listener of messageListeners) listener(message);
+      if (message.type === 'connection.state') {
         for (const listener of stateListeners) listener(message.state);
       } else if (message.type.startsWith('terminal.')) {
         for (const listener of listeners) listener(message);
