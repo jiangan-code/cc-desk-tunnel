@@ -426,7 +426,7 @@ export function createProxyServer(options: ServerOptions) {
     if (!options.claude) throw new DomainError('native_unavailable', '离线模拟不启动原生终端。');
     if (terminal || runs.size || mutations.size)
       throw new DomainError('native_busy', '请先结束原生运行或会话管理，再打开终端。');
-    if (!peer.tunnel?.ssh) throw new DomainError('execution_offline', 'Windows SSH 尚未就绪。');
+    if (!peer.tunnel?.ssh) throw new DomainError('execution_offline', '本机 SSH 尚未就绪。');
     const current: Terminal = { id: randomUUID(), sessionId: command.sessionId, owner: peer };
     terminal = current;
     try {
@@ -616,7 +616,7 @@ export function createProxyServer(options: ServerOptions) {
     if (options.claude && !peer.tunnel?.ssh)
       throw new DomainError(
         'execution_offline',
-        'Windows SSH 尚未就绪，请通过桌面客户端重新建立连接。',
+        '本机 SSH 尚未就绪，请通过桌面客户端重新建立连接。',
       );
     peer.subscriptions.add(command.sessionId);
     const run: Run = {
@@ -658,7 +658,7 @@ export function createProxyServer(options: ServerOptions) {
       cancel(
         run,
         options.claude
-          ? '用户停止；已发出的 Windows SSH 命令可能继续执行，副作用未撤销，不能自动重试。'
+          ? '用户停止；已发出的 本机 SSH 命令可能继续执行，副作用未撤销，不能自动重试。'
           : '用户停止',
       );
       return;
@@ -851,7 +851,7 @@ export function createProxyServer(options: ServerOptions) {
         send(peer, {
           type: 'connection.error',
           code: 'device_busy',
-          message: '已有 Windows 设备连接或正在清理，请稍后重试。',
+          message: '已有桌面设备连接或正在清理，请稍后重试。',
         });
         peer.socket.close(4003, 'Device busy');
         return true;
@@ -893,7 +893,7 @@ export function createProxyServer(options: ServerOptions) {
           send(peer, {
             type: 'connection.error',
             code: 'ssh_failed',
-            message: 'Windows SSH / PowerShell 就绪探测失败。',
+            message: '本机 SSH / Shell 就绪探测失败。',
           });
           peer.socket.close(4003, 'SSH probe failed');
         }),

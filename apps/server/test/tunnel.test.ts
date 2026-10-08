@@ -51,3 +51,20 @@ test('missing frps executable fails and closes without leaving credentials or ha
   await tunnel.close();
   assert.equal(existsSync(tunnel.directory), false);
 });
+
+test('Linux context targets desktop Bash and its actual schedules path', () => {
+  const prompt = remotePrompt(
+    "/home/user/it's 中文",
+    {
+      configPath: '/private/ssh_config',
+      powershellPath: '/bin/bash',
+      platform: 'linux',
+      schedulesPath: '/home/user/.config/CC Desk Tunnel/schedules.json',
+    },
+    'session-id',
+  );
+  assert.match(prompt, /Shell: \/bin\/bash/);
+  assert.match(prompt, /NOT this agent host/);
+  assert.match(prompt, /\.config\/CC Desk Tunnel\/schedules.json/);
+  assert.doesNotMatch(prompt, /PowerShell|%APPDATA%/);
+});

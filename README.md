@@ -2,6 +2,8 @@
 
 **简体中文** | [English](README.en.md)
 
+> Linux 桌面适配：Ubuntu 26.04 LTS x86_64 已加入 Bash 执行通道和 deb 打包。构建、安装与协议升级见 [Linux 桌面指南](docs/linux-desktop.md)。
+
 用桌面客户端驱动云端的 Claude Code，经反向隧道在你的 Windows 本机执行。
 
 Claude Code（简称 CC）运行在一台 Linux 服务器上；项目代码、编译器和各种工具都留在 Windows 本机。CC Desk Tunnel 把两端接起来：服务器上是一个容器，Windows 上是一个桌面客户端，Claude 通过一条加密的反向 SSH 通道在你的电脑上读写文件、执行命令。

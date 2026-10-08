@@ -33,7 +33,9 @@
     "prepare:windows:package": "pwsh.exe -NoLogo -NoProfile -File scripts/prepare-windows.ps1 -IncludePowerShell",
     "package:windows": "node scripts/package-windows.mjs",
     "release": "node scripts/release.mjs",
-    "desktop": "npm run start --workspace @cc-desk-tunnel/desktop"
+    "desktop": "npm run start --workspace @cc-desk-tunnel/desktop",
+    "prepare:linux": "node scripts/prepare-linux.mjs",
+    "package:linux": "node scripts/package-linux.mjs"
   },
   "devDependencies": {
     "@playwright/test": "1.63.0",

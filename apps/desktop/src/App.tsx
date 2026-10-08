@@ -226,7 +226,10 @@ export function App() {
     });
   }, []);
   useEffect(() => {
-    if (connected) void window.desktop?.saveLogin(form);
+    if (connected)
+      void window.desktop?.saveLogin(form).catch((error) => {
+        setError(error instanceof Error ? error.message : '无法保存登录凭据。');
+      });
   }, [connected]);
   useEffect(() => {
     const close = () => client.disconnect();
