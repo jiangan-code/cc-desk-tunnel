@@ -40,6 +40,7 @@ ccdt daemon uninstall    # 停止并移除
 
 - 安装前先退出正在运行的 `ccdt`：同一服务同时只接受一台执行设备。
 - 后台服务启动时从密钥环读凭据；密钥环还锁着时它会失败，systemd 每 10 秒重试，解锁后自动连上。`ccdt login` 换了服务或凭据后，运行 `systemctl --user restart ccdt`。
+- Claude 在本机执行的命令继承后台服务的环境。systemd 的 PATH 不含 `~/.local/bin` 等登录 shell 才加的目录，所以安装时会记下当前终端的 PATH；PATH 变了就再运行一次 `ccdt daemon install`（会重启后台服务）。代理变量不会写进服务配置。
 - 用户服务随桌面登录启动；退出桌面会话后也要保持运行，执行 `loginctl enable-linger`。
 - 日志：`journalctl --user -u ccdt`。与服务端的连接彻底断开（断网超过 3 分钟、服务端重启）时后台服务退出，systemd 10 秒后重新连接，原来的 agent 已结束。状态来自服务端注入原生目录 `.claude/settings.local.json` 的 Claude Code hooks，你在那里加的其他 hooks 会保留。
 
