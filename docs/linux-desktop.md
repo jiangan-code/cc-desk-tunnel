@@ -27,6 +27,10 @@ sudo apt install ./artifacts/linux/CC-Desk-Tunnel-0.2.5-amd64.deb
 
 **客户端与服务端必须一起使用本次代码（协议 11）。** 旧协议会明确拒绝连接。Linux 当前使用 deb 覆盖升级；服务端提供的 Windows exe 自升级不适用于 Linux。现有用户数据保持在 Electron 的 userData 目录（通常为 `~/.config/CC Desk Tunnel`，服从 XDG 配置），实际计划任务路径随握手传给服务端。
 
+## 终端客户端
+
+不想开图形界面时，可以用 [`ccdt`](../apps/cli/README.md) 在系统终端里直接使用远端原版 Claude Code：`npm run install:cli` 安装、`ccdt login` 保存连接信息，之后在项目目录运行 `ccdt`。它与桌面客户端共用同一套连接桥、隧道和 SSH 实现，服务端无需改动。
+
 ## 平台行为
 
 - 路径区分大小写，保留 POSIX 文件名中的反斜杠；Windows 盘符 / UNC 路径保留原比较规则。

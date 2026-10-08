@@ -137,7 +137,7 @@ sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/sun168567/cc-desk-t
 | [安全说明](SECURITY.md) | 威胁模型、已有防护、已知不足、漏洞报告 |
 | [架构](docs/architecture.md) | 组成、连接建立过程、关键设计决定 |
 | [原生运行与会话存储](docs/native-runtime.md) | 如何驱动官方 CLI、上下文归属、审批、保留期 |
-| [Windows 客户端](apps/desktop/README.md) · [Linux 服务](apps/server/README.md) · [消息契约](packages/protocol/README.md) | 各模块的实现说明 |
+| [Windows 客户端](apps/desktop/README.md) · [Linux 终端客户端](apps/cli/README.md) · [Linux 服务](apps/server/README.md) · [消息契约](packages/protocol/README.md) | 各模块的实现说明 |
 | [路线与现状](docs/roadmap.md) · [变更记录](CHANGELOG.md) | 已完成、待验证、计划；各版本的变化 |
 | [开发约定](docs/development.md) | 分支、提交、检查、发布 |
 
@@ -157,6 +157,7 @@ npm run package:server    # 生成服务端程序包，传到服务器后运行�
 
 ```text
 apps/desktop/       Windows 客户端：界面（React）、Electron 主进程、连接桥与本机执行组件
+apps/cli/           Linux 终端客户端 ccdt：在系统终端里使用远端原版 Claude Code
 apps/server/        Linux 服务：会话管理、Claude Code 适配、Windows 隧道、调用统计、版本跟踪
 packages/protocol/  两端消息契约（Zod）
 deploy/             Docker 部署与运维脚本
