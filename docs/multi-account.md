@@ -13,6 +13,7 @@
 | `~/.claude/` | 默认账号 `default`，就是 CLI 自己的默认目录 |
 | `~/.claude-accounts/<名字>/` | 其他账号，一个账号一个目录，作为该账号进程的 `CLAUDE_CONFIG_DIR` |
 | `~/.claude-accounts/<名字>/projects` | 软链接到 `~/.claude/projects`，所以对话是共用的 |
+| `~/.claude-accounts/<名字>/skills` 等 | 新建时默认账号已有的 `skills`、`agents`、`commands`、`CLAUDE.md` 也软链接过去，各账号共用 |
 | `<数据目录>/state/account.json` | 当前账号的名字 |
 
 容器里 `HOME=/data/home`，这些目录都在数据目录内：重建容器不会丢失，`deploy/manage.sh backup` 也会一起备份。
@@ -57,6 +58,7 @@ CLAUDE_CONFIG_DIR=~/.claude-accounts/work claude auth login  # 打印授权链�
 mkdir -p ~/.claude-accounts/work && chmod 700 ~/.claude-accounts ~/.claude-accounts/work
 ln -s ~/.claude/projects ~/.claude-accounts/work/projects
 cp ~/.claude/settings.json ~/.claude-accounts/work/   # 可选：沿用默认账号的设置
+ln -s ~/.claude/skills ~/.claude-accounts/work/skills  # 可选：共用 skills
 ```
 
 ## 注意

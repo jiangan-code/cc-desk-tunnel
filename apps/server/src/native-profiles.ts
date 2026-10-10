@@ -12,6 +12,9 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { ACCOUNT_PROFILE_PATTERN, DEFAULT_ACCOUNT_PROFILE } from '@cc-desk-tunnel/protocol';
 
+// What the user wrote for the CLI rather than what the CLI keeps; a new account links to the default one's.
+const SHARED = ['skills', 'agents', 'commands', 'CLAUDE.md'];
+
 // Each Claude account beyond the default one is a CLI configuration directory of its own (`CLAUDE_CONFIG_DIR`) under
 // `root`, holding its sign-in, settings and CLI state. Conversations stay shared: its `projects` links to the default
 // directory's, where the proxy finds, resumes, renames and deletes native sessions. The proxy remembers which
@@ -56,7 +59,8 @@ export class AccountProfiles {
     writeFileSync(`${this.stateFile}.next`, JSON.stringify({ profile }) + '\n', { mode: 0o600 });
     renameSync(`${this.stateFile}.next`, this.stateFile);
   }
-  // A new account starts from a copy of the default settings and the shared conversations.
+  // A new account starts from a copy of the default settings, the shared conversations and the user's own skills,
+  // agents, commands and instructions.
   add(profile: string) {
     if (!ACCOUNT_PROFILE_PATTERN.test(profile) || profile === DEFAULT_ACCOUNT_PROFILE)
       throw new Error(`Invalid account profile ${profile}`);
@@ -67,6 +71,9 @@ export class AccountProfiles {
     const projects = join(this.defaultDirectory, 'projects');
     mkdirSync(projects, { recursive: true, mode: 0o700 });
     symlinkSync(projects, join(directory, 'projects'));
+    for (const name of SHARED)
+      if (existsSync(join(this.defaultDirectory, name)))
+        symlinkSync(join(this.defaultDirectory, name), join(directory, name));
     const settings = join(this.defaultDirectory, 'settings.json');
     if (existsSync(settings)) copyFileSync(settings, join(directory, 'settings.json'));
   }

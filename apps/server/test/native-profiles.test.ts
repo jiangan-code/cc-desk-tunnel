@@ -1,6 +1,14 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readlinkSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AccountProfiles } from '../src/native-profiles.ts';
@@ -11,6 +19,7 @@ test('further accounts get their own CLI directory and share the conversations o
   const defaults = join(base, 'claude');
   mkdirSync(defaults);
   writeFileSync(join(defaults, 'settings.json'), '{"theme":"dark"}\n');
+  mkdirSync(join(defaults, 'skills'));
   const profiles = new AccountProfiles(
     join(base, 'account.json'),
     join(base, 'accounts'),
@@ -25,6 +34,8 @@ test('further accounts get their own CLI directory and share the conversations o
   const directory = join(base, 'accounts', 'work');
   assert.equal(readlinkSync(join(directory, 'projects')), join(defaults, 'projects'));
   assert.equal(readFileSync(join(directory, 'settings.json'), 'utf8'), '{"theme":"dark"}\n');
+  assert.equal(readlinkSync(join(directory, 'skills')), join(defaults, 'skills'));
+  assert.equal(existsSync(join(directory, 'agents')), false);
   assert.deepEqual(profiles.environment('work'), { CLAUDE_CONFIG_DIR: directory });
   assert.throws(() => profiles.add('work'));
   assert.throws(() => profiles.add('default'));
