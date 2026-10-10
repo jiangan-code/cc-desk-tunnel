@@ -103,6 +103,10 @@ export function deckRows(
   return rows;
 }
 
+const switched = (entry) =>
+  `已切换到账号 ${entry.profile}：之后新开的 agent 用它，运行中的按 d 结束后再进入即换号。` +
+  (entry.loggedIn ? '' : '它还没登录，进入 agent 后按提示登录。');
+
 const KEYS = /\x1b\[[0-9;?]*[A-Za-z~]|\x1bO[A-Za-z]|\x1b|[\s\S]/gu;
 
 // The agent list, drawn on the alternate screen between visits to agents. It follows the service's sessions and
@@ -132,6 +136,8 @@ export class Deck {
     // Project directory → its repository, read with git on this computer; null outside one.
     this.repositories = new Map();
     this.terminals = new Map();
+    // The service's Claude accounts (`account.state`); without `profiles` the service has only one.
+    this.account = null;
     this.selected = null;
     this.filter = '';
     this.mode = null;
@@ -151,7 +157,9 @@ export class Deck {
     connection.closed.then((reason) => this.finish({ quit: true, lost: reason ?? '连接已断开。' }));
   }
   receive(message) {
-    if (message.type === 'session.updated') this.sessions.set(message.session.id, message.session);
+    if (message.type === 'account.state') this.account = message;
+    else if (message.type === 'session.updated')
+      this.sessions.set(message.session.id, message.session);
     else if (message.type === 'session.deleted') this.sessions.delete(message.sessionId);
     else if (message.type === 'terminals.state') {
       const previous = this.terminals;
@@ -197,6 +205,8 @@ export class Deck {
     this.message = message;
     this.attached = null;
     void this.readRepositories();
+    // A sign-in made in an agent with /login shows here once the service reads the accounts again.
+    this.connection.request({ type: 'account.status' }).catch(() => {});
     return new Promise((resolve) => {
       this.resolve = resolve;
       this.show();
@@ -258,6 +268,7 @@ export class Deck {
   }
   key(key) {
     const mode = this.mode;
+    if (mode?.type === 'accounts') return this.accountKey(mode, key);
     if (mode?.type === 'confirm') {
       this.mode = null;
       if (key === 'y' || key === 'Y') mode.yes();
@@ -359,6 +370,13 @@ export class Deck {
       case '/':
         this.mode = { type: 'search', label: '搜索：', value: this.filter };
         return;
+      case 'a': {
+        const profiles = this.account?.profiles;
+        if (!profiles) return void (this.message = '服务端版本不支持多账号，请先升级服务端。');
+        const index = profiles.findIndex((entry) => entry.profile === this.account.profile);
+        this.mode = { type: 'accounts', index: Math.max(0, index) };
+        return;
+      }
       case 'q':
       case '\x03': {
         const running = this.terminals.size;
@@ -370,6 +388,54 @@ export class Deck {
         };
         return;
       }
+    }
+  }
+  // The account list: Enter makes the selected account the one new agents use, n adds one.
+  accountKey(mode, key) {
+    const profiles = this.account?.profiles ?? [];
+    switch (key) {
+      case 'j':
+      case '\x1b[B':
+      case '\x1bOB':
+        mode.index = Math.min(profiles.length - 1, mode.index + 1);
+        return;
+      case 'k':
+      case '\x1b[A':
+      case '\x1bOA':
+        mode.index = Math.max(0, mode.index - 1);
+        return;
+      case '\r': {
+        this.mode = null;
+        const chosen = profiles[mode.index];
+        if (!chosen || chosen.profile === this.account.profile) return;
+        this.connection.request({ type: 'account.use', profile: chosen.profile }).then(
+          () => this.notice(switched(chosen)),
+          (error) => this.notice(error.message),
+        );
+        return;
+      }
+      case 'n':
+        this.mode = {
+          type: 'prompt',
+          label: '新账号的名字（小写字母、数字、- 和 _）：',
+          value: '',
+          submit: (profile) => {
+            if (!profile) return;
+            this.connection.request({ type: 'account.add', profile }).then(
+              () =>
+                this.notice(
+                  `已新建账号 ${profile} 并切换。进入 agent 后按 Claude Code 的提示登录。`,
+                ),
+              (error) => this.notice(error.message),
+            );
+          },
+        };
+        return;
+      case '\x1b':
+      case '\x03':
+      case 'a':
+      case 'q':
+        this.mode = null;
     }
   }
   async remove(sessionId, worktree) {
@@ -432,6 +498,7 @@ export class Deck {
       count('waiting') && `\x1b[33;1m${count('waiting')} 个等你\x1b[0m`,
       count('busy') && `${count('busy')} 个运行中`,
       this.background && '\x1b[2m后台常驻\x1b[0m',
+      this.account?.profiles && `账号 ${this.account.profile}`,
     ]
       .filter(Boolean)
       .join(' · ');
@@ -448,10 +515,14 @@ export class Deck {
       const [label, colour] = row.terminal ? STATUS[row.terminal.status] : STOPPED;
       const selected = row.session.id === this.selected;
       const time = ago(row.activity);
+      // An agent started as another account than the one new agents use says so.
+      const profile = row.terminal?.profile;
+      const as = profile && this.account?.profile && profile !== this.account.profile;
+      const name = `${row.session.title}${row.branch ? `  [${row.branch}]` : ''}${as ? `  @${profile}` : ''}`;
       const text =
         ` ${selected ? '>' : ' '} \x1b[${colour}m${fit(label, 6)}\x1b[0m` +
         (selected ? '\x1b[7m' : '') +
-        ` ${fit(row.branch ? `${row.session.title}  [${row.branch}]` : row.session.title, width - 24)} ${fit(time, 11)}` +
+        ` ${fit(name, width - 24)} ${fit(time, 11)}` +
         '\x1b[0m';
       body.push({ text, selected });
     }
@@ -461,6 +532,22 @@ export class Deck {
           ? '   没有符合搜索的会话。按 Esc 清除搜索。'
           : '   还没有会话。按 n 新建一个 agent。',
       });
+    if (this.mode?.type === 'accounts') {
+      body.length = 0;
+      body.push({ text: ' \x1b[1mClaude 账号\x1b[0m  \x1b[2m新开的 agent 用当前账号\x1b[0m' });
+      (this.account?.profiles ?? []).forEach((entry, index) => {
+        const selected = index === this.mode.index;
+        const state = entry.loggedIn
+          ? `${entry.email ?? '已登录'}${entry.subscriptionType ? `  ${entry.subscriptionType}` : ''}`
+          : '\x1b[33m未登录\x1b[0m';
+        body.push({
+          selected,
+          text:
+            ` ${selected ? '>' : ' '} ${selected ? '\x1b[7m' : ''}${fit(entry.profile, 16)}\x1b[0m` +
+            ` ${fit(entry.profile === this.account.profile ? '当前' : '', 4)} ${state}`,
+        });
+      });
+    }
     const room = height - 5;
     const at = Math.max(
       0,
@@ -477,14 +564,18 @@ export class Deck {
     const mode = this.mode;
     let cursor = null;
     if (mode?.type === 'confirm') lines.push(` \x1b[33m${fit(mode.text, width - 2)}\x1b[0m`);
+    else if (mode?.type === 'accounts') lines.push(` ${fit(this.message, width - 2)}`);
     else if (mode) {
       const text = fit(mode.label + mode.value, width - 3).trimEnd();
       lines.push(` ${text}`);
       cursor = [lines.length, 2 + cellWidth(text)];
     } else lines.push(` ${fit(this.message, width - 2)}`);
-    const keys = mode
-      ? 'Enter 确认  Esc 取消'
-      : `Enter 进入  n 新建  w worktree  d 结束  x 删除  r 改名  / 搜索  q 退出${width >= 98 ? '  |  Ctrl+Q 从 agent 回到这里' : ''}`;
+    const keys =
+      mode?.type === 'accounts'
+        ? 'Enter 切换  n 新建账号  Esc 返回'
+        : mode
+          ? 'Enter 确认  Esc 取消'
+          : `Enter 进入  n 新建  w worktree  d 结束  x 删除  r 改名  a 账号  / 搜索  q 退出${width >= 106 ? '  |  Ctrl+Q 从 agent 回到这里' : ''}`;
     lines.push(` \x1b[2m${fit(keys, width - 2)}\x1b[0m`);
     this.output.write(
       '\x1b[H' +
