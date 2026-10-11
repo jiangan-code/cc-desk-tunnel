@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { clearConfig, desktopLogin, loadConfig, saveConfig } from '../src/config.mjs';
 import { environmentProxy } from '../src/environment.mjs';
-import { chooseSession, listAgents } from '../src/main.mjs';
+import { chooseSession, listAgents, removeAgents } from '../src/main.mjs';
 import { attachTerminal, inputFrames } from '../src/terminal.mjs';
 import { Deck, cellWidth, deckRows, fit } from '../src/deck.mjs';
 import { addWorktree, ownWorktree, removeWorktree, repositoryOf } from '../src/git.mjs';
@@ -577,4 +577,31 @@ test('only agents that newly wait and are not on screen notify', () => {
     newlyWaiting(previous, terminals).map((terminal) => terminal.sessionId),
     ['b'],
   );
+});
+
+test('rm deletes stopped sessions and refuses, deleting nothing, when one is running or unknown', async () => {
+  const sessions = [
+    { id: 'a', projectPath: '/p', title: 'one' },
+    { id: 'b', projectPath: '/p', title: 'two' },
+    { id: 'c', projectPath: '/q', title: 'other' },
+  ];
+  const connection = fakeConnection(sessions);
+  connection.request = async (command) => {
+    connection.requests.push(command);
+    if (command.type === 'terminal.list')
+      connection.emit({ type: 'terminals.state', terminals: [{ sessionId: 'a', status: 'idle' }] });
+    return { ok: true };
+  };
+  assert.deepEqual(
+    (await removeAgents(connection, ['b', 'c', 'b'])).map((agent) => agent.id),
+    ['b', 'c'],
+  );
+  assert.deepEqual(connection.requests.slice(1), [
+    { type: 'session.delete', sessionId: 'b' },
+    { type: 'session.delete', sessionId: 'c' },
+  ]);
+  connection.requests.length = 0;
+  await assert.rejects(removeAgents(connection, ['b', 'a']), /还在运行（idle）/);
+  await assert.rejects(removeAgents(connection, ['b', 'zz']), /没有这个会话：zz/);
+  assert.ok(connection.requests.every((command) => command.type === 'terminal.list'));
 });
