@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { clearConfig, desktopLogin, loadConfig, saveConfig } from '../src/config.mjs';
 import { environmentProxy } from '../src/environment.mjs';
-import { chooseSession } from '../src/main.mjs';
+import { chooseSession, listAgents } from '../src/main.mjs';
 import { attachTerminal, inputFrames } from '../src/terminal.mjs';
 import { Deck, cellWidth, deckRows, fit } from '../src/deck.mjs';
 import { addWorktree, ownWorktree, removeWorktree, repositoryOf } from '../src/git.mjs';
@@ -229,6 +229,60 @@ test('the directory resumes its latest session unless a new one is asked for', a
     title: 'p',
     projectPath: '/p',
   });
+
+  connection = fakeConnection(sessions);
+  assert.equal(
+    (await chooseSession(connection, '/p', { new: true, name: ' fm-t1 ' })).title,
+    'fm-t1',
+  );
+  assert.equal(connection.requests[0].title, 'fm-t1');
+});
+
+test('ls reports each session of a directory with its terminal status, stopped without one', async () => {
+  const sessions = [
+    { id: 'a', projectPath: '/p', title: 'one' },
+    { id: 'b', projectPath: '/p', title: 'two' },
+    { id: 'c', projectPath: '/q', title: 'other' },
+  ];
+  const connection = fakeConnection(sessions);
+  connection.request = async (command) => {
+    connection.requests.push(command);
+    connection.emit({ type: 'terminals.state', terminals: [{ sessionId: 'a', status: 'busy' }] });
+    return { ok: true };
+  };
+  assert.deepEqual(await listAgents(connection, '/p'), [
+    { id: 'a', title: 'one', projectPath: '/p', status: 'busy' },
+    { id: 'b', title: 'two', projectPath: '/p', status: 'stopped' },
+  ]);
+  assert.deepEqual(connection.requests, [{ type: 'terminal.list' }]);
+  assert.equal((await listAgents(connection)).length, 3);
+  const silent = fakeConnection(sessions);
+  await assert.rejects(listAgents(silent, '/p', { timeoutMs: 10 }), /没有返回/);
+});
+
+test('a terminal that is not detachable sends Ctrl+Q to the CLI and settles with its exit code', async () => {
+  const connection = fakeConnection();
+  const tty = fakeTty();
+  const terminal = attachTerminal(connection, SESSION, { ...tty, detachable: false });
+  connection.emit({ type: 'terminal.opened', sessionId: SESSION, terminalId: TERMINAL });
+  tty.input.emit('data', Buffer.from('ls\x11rest'));
+  assert.deepEqual(
+    connection.sent.map((message) => message.data),
+    ['ls\x11rest'],
+  );
+  terminal.close();
+  assert.deepEqual(connection.requests.at(-1), {
+    type: 'terminal.close',
+    sessionId: SESSION,
+    terminalId: TERMINAL,
+  });
+  connection.emit({
+    type: 'terminal.closed',
+    sessionId: SESSION,
+    terminalId: TERMINAL,
+    exitCode: 3,
+  });
+  assert.deepEqual(await terminal.exited, { code: 3 });
 });
 
 test('Ctrl+Q leaves the agent running: input before it is sent, the terminal is detached', async () => {
