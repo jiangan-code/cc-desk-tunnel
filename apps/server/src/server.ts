@@ -49,7 +49,8 @@ import type { NativeLogin } from './native-account.ts';
 import { NativeInput } from './native-input.ts';
 import { RelayTunnel } from './relay.ts';
 import { completeOnboarding } from './native-onboarding.ts';
-import { readNativeSettings, updateNativeSettings } from './native-settings.ts';
+import { AccountProfiles } from './native-profiles.ts';
+import { readNativeSettings, settingsPath, updateNativeSettings } from './native-settings.ts';
 import type { NativeTerminal } from './native-terminal.ts';
 import { simulate } from './simulation.ts';
 import { SessionStore } from './store.ts';
@@ -90,6 +91,8 @@ export type Run = {
   cancelReason?: string;
   input?: NativeInput;
   controls: { refresh?: () => Promise<void> };
+  // The account its CLI runs as.
+  profile: string;
 };
 // A native terminal keeps running while no client shows it; `reattach` marks one that was shown when its
 // connection dropped, to be shown again when it resumes.
@@ -101,10 +104,11 @@ type Terminal = {
   status: TerminalStatus;
   since: string;
   reattach?: boolean;
+  profile: string;
 };
 // Each terminal is a CLI process with its own memory; this bounds what one device can start.
 const MAX_TERMINALS = 8;
-type Login = { process: NativeLogin; owner: Peer; url?: string };
+type Login = { process: NativeLogin; owner: Peer; url?: string; profile: string };
 type CommandOf<T extends Command['type']> = Extract<Command, { type: T }>;
 export type ServerOptions = {
   token: string;
@@ -122,6 +126,8 @@ export type ServerOptions = {
   updates?: Omit<UpdateOptions, 'clientDir'>;
   // How long a dropped resumable connection is kept for its client to come back.
   resumeGraceMs?: number;
+  // Where the configuration directories of further Claude accounts are; defaults to ~/.claude-accounts.
+  accountsDir?: string;
 };
 
 export function createProxyServer(options: ServerOptions) {
@@ -132,6 +138,15 @@ export function createProxyServer(options: ServerOptions) {
       'Native mode requires TLS or explicit reverse proxy mode, and frps configuration.',
     );
   const store = new SessionStore(options.dataDir);
+  const profiles = new AccountProfiles(join(store.directory, 'account.json'), options.accountsDir);
+  // The CLI options for a process that runs as `profile`.
+  const claudeAs = (profile: string): ClaudeOptions => ({
+    ...options.claude!,
+    environment: { ...options.claude!.environment, ...profiles.environment(profile) },
+  });
+  // Runs and terminals that use an account; its sign-in must not change under them.
+  const usedBy = (profile: string) =>
+    [...runs.values(), ...terminals.values()].some((current) => current.profile === profile);
   const usage = new UsageLog(store.database);
   const usageReceiver = options.claude ? createUsageReceiver(usage) : undefined;
   const peers = new Set<Peer>();
@@ -152,6 +167,7 @@ export function createProxyServer(options: ServerOptions) {
           status: current.status,
           attached: !!current.process?.attached,
           since: current.since,
+          profile: current.profile,
         })),
     });
   }
@@ -418,7 +434,7 @@ export function createProxyServer(options: ServerOptions) {
   async function native(run: Run) {
     try {
       const { session } = store.get(run.sessionId);
-      const status = await runClaude(options.claude!, {
+      const status = await runClaude(claudeAs(run.profile), {
         sessionId: run.sessionId,
         nativeRoot: session.nativeRoot ?? session.id,
         projectPath: session.projectPath,
@@ -460,12 +476,28 @@ export function createProxyServer(options: ServerOptions) {
     }
   }
 
+  // Every account's sign-in is read from its own `claude auth status`; the fields at the top are the active one's.
   async function publishAccount(target?: Peer, notice?: string) {
     const { accountStatus } = await import('./native-account.ts');
+    const active = profiles.active;
+    const all = await Promise.all(
+      profiles.list().map(async (profile) => ({
+        profile,
+        ...(await accountStatus(options.claude!.executable, profiles.environment(profile))),
+      })),
+    );
+    const { profile: _, ...current } = all.find((entry) => entry.profile === active)!;
     const state: AccountState = {
-      ...(await accountStatus(options.claude!.executable)),
-      login: login?.url ? { url: login.url } : null,
+      ...current,
+      login: login?.url && login.profile === active ? { url: login.url } : null,
       notice,
+      profile: active,
+      profiles: all.map(({ profile, loggedIn, email, subscriptionType }) => ({
+        profile,
+        loggedIn,
+        ...(email && { email }),
+        ...(subscriptionType && { subscriptionType }),
+      })),
     };
     if (target) send(target, { type: 'account.state', ...state });
     else broadcast({ type: 'account.state', ...state });
@@ -485,13 +517,31 @@ export function createProxyServer(options: ServerOptions) {
       login?.process.cancel();
       return;
     }
-    if (terminals.size || runs.size || mutations.size)
-      throw new DomainError('native_busy', '请先结束原生运行或终端，再管理账号。');
+    if (command.type === 'account.use' || command.type === 'account.add') {
+      if (login) throw new DomainError('login_active', '请先完成或取消正在进行的登录。');
+      try {
+        if (command.type === 'account.add') {
+          if (profiles.has(command.profile))
+            throw new DomainError('profile_exists', `账号 ${command.profile} 已存在。`);
+          profiles.add(command.profile);
+        } else if (!profiles.has(command.profile))
+          throw new DomainError('profile_unknown', `没有账号 ${command.profile}。`);
+        profiles.use(command.profile);
+      } catch (error) {
+        if (error instanceof DomainError) throw error;
+        throw new DomainError('profile_failed', '账号目录无法创建或切换，请检查服务端磁盘与权限。');
+      }
+      await publishAccount();
+      return;
+    }
+    const profile = profiles.active;
+    if (usedBy(profile) || mutations.size)
+      throw new DomainError('native_busy', '请先结束使用这个账号的原生运行或终端，再管理账号。');
     const { NativeLogin, accountLogout } = await import('./native-account.ts');
     if (command.type === 'account.logout') {
       login?.process.cancel();
       try {
-        await accountLogout(options.claude.executable);
+        await accountLogout(options.claude.executable, profiles.environment(profile));
       } catch {
         throw new DomainError('logout_failed', '退出登录失败，请在原生终端执行 /logout 确认。');
       }
@@ -501,12 +551,13 @@ export function createProxyServer(options: ServerOptions) {
     if (!login) {
       const current: Login = {
         owner: peer,
+        profile,
         process: new NativeLogin(
           options.claude.executable,
           (succeeded) => {
             if (login === current) login = undefined;
             if (closing) return;
-            if (succeeded) completeOnboarding();
+            if (succeeded) completeOnboarding(profiles.directory(profile));
             track(
               publishAccount(
                 undefined,
@@ -520,6 +571,9 @@ export function createProxyServer(options: ServerOptions) {
             if (closing || login !== current) return;
             track(publishAccount(undefined, text).catch(() => {}));
           },
+          undefined,
+          undefined,
+          profiles.environment(profile),
         ),
       };
       login = current;
@@ -550,7 +604,7 @@ export function createProxyServer(options: ServerOptions) {
     peer.socket.once('close', closed);
     try {
       const events = await readNativeStatus(
-        options.claude,
+        claudeAs(profiles.active),
         store.directory,
         nativeRoot(command.sessionId),
         command.sessionId,
@@ -607,6 +661,7 @@ export function createProxyServer(options: ServerOptions) {
       owner: peer,
       status: 'starting',
       since: new Date().toISOString(),
+      profile: profiles.active,
     };
     terminals.set(current.id, current);
     try {
@@ -614,7 +669,7 @@ export function createProxyServer(options: ServerOptions) {
         await import('./native-terminal.ts');
       if (closing || peer.socket.readyState !== WebSocket.OPEN)
         throw new Error('Connection closed');
-      completeOnboarding();
+      completeOnboarding(profiles.directory(current.profile));
       const cwd = prepareNativeDirectory(options.claude, store.directory, nativeRoot(session.id));
       // Runs and terminals of a session share this directory, so the latest conversation may be either. Without one,
       // `--continue` would end the CLI at once.
@@ -634,7 +689,7 @@ export function createProxyServer(options: ServerOptions) {
           cols: command.cols,
           rows: command.rows,
           env: {
-            ...terminalEnvironment(options.claude),
+            ...terminalEnvironment(claudeAs(current.profile)),
             ...hookEnvironment(`${hookAddress}/${current.id}/${hookSecret}`),
           },
         },
@@ -823,6 +878,7 @@ export function createProxyServer(options: ServerOptions) {
       toolFinished: false,
       approvals: new Map(),
       controls: {},
+      profile: profiles.active,
     };
     runs.set(command.sessionId, run);
     if (options.claude) run.input = new NativeInput(run.sessionId, (event) => emit(run, event));
@@ -883,16 +939,19 @@ export function createProxyServer(options: ServerOptions) {
       case 'account.code':
       case 'account.cancel':
       case 'account.logout':
+      case 'account.use':
+      case 'account.add':
         await account(peer, command);
         return undefined;
       case 'settings.get':
       case 'settings.update': {
         if (!options.claude) throw new DomainError('native_unavailable', '离线模拟没有原生设置。');
         try {
+          const path = settingsPath(profiles.directory(profiles.active));
           const values =
             command.type === 'settings.get'
-              ? readNativeSettings()
-              : updateNativeSettings(command.values);
+              ? readNativeSettings(path)
+              : updateNativeSettings(command.values, path);
           send(peer, { type: 'settings.state', requestId: command.requestId, values });
         } catch {
           throw new DomainError(

@@ -20,7 +20,9 @@ fe503f65c6289d59c23e5b21ae44f03583f997dd33a2cbfc75ab4f96fb8fc73f
 
 登录 / 退出 / 状态由服务端驱动官方 `claude auth login / logout / status`，授权链接与回填代码经桌面端转交，凭据只由 CLI 自己读写。官方 `auth login` 不记下首次引导已完成（2.1.286 实测），交互式终端因此会让已登录账号重走主题与登录。
 
-**代理唯一直接改动 CLI 状态文件的地方**（`src/native-onboarding.ts`）：终端启动前，若官方凭据文件里已有登录而 `~/.claude.json` 缺少 `hasCompletedOnboarding`，服务端补上这一项；判断时只看凭据是否存在，不读取、不复制也不转发其内容，未登录时不动，引导照常出现。除此之外，代理对 CLI 的配置只通过官方 settings 文件与命令行参数表达。
+**代理唯一直接改动 CLI 状态文件的地方**（`src/native-onboarding.ts`）：终端启动前，若官方凭据文件里已有登录而 `~/.claude.json` 缺少 `hasCompletedOnboarding`，服务端补上这一项；判断时只看凭据是否存在，不读取、不复制也不转发其内容，未登录时不动，引导照常出现。除此之外，代理对 CLI 的配置只通过官方 settings 文件、命令行参数和环境变量表达。
+
+多账号（见[多个 Claude 账号](multi-account.md)）用官方的 `CLAUDE_CONFIG_DIR`：每个额外账号一个配置目录，服务端只给该账号的 CLI 进程设置这个变量。新建账号时，服务端创建目录、把其中的 `projects`（以及默认目录已有的 `skills`、`agents`、`commands`、`CLAUDE.md`）软链接到默认目录、复制一份默认的 `settings.json`；不读取、不复制凭据。上面补 `hasCompletedOnboarding` 的规则对每个账号目录同样适用。
 
 每次模型调用的统计来自 CLI 自带的 OpenTelemetry 日志导出（`claude_code.api_request`）：服务在环回地址起接收端，只给自己启动的 CLI 进程设置 `CLAUDE_CODE_ENABLE_TELEMETRY` 与 `OTEL_*LOGS*` 变量，只保存模型、token、费用估算、耗时与会话 ID，不保存账号标识和内容；未开启提示词 / 回复导出。费用是 CLI 按 API 价格的估算，不是订阅账单。
 

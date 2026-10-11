@@ -24,6 +24,19 @@ export const nativeAccountSchema = z.object({
   apiKeySource: z.string().optional(),
   tokenSource: z.string().optional(),
 });
+// A Claude account the service can run the CLI as: `default` is the CLI's own configuration directory, others
+// have one each. Names are lowercase so they are safe as directory names.
+export const DEFAULT_ACCOUNT_PROFILE = 'default';
+export const ACCOUNT_PROFILE_PATTERN = /^[a-z0-9][a-z0-9_-]{0,31}$/;
+const accountProfile = z.string().regex(ACCOUNT_PROFILE_PATTERN);
+export const accountProfileSchema = z.object({
+  profile: accountProfile,
+  loggedIn: z.boolean(),
+  email: z.string().optional(),
+  subscriptionType: z.string().optional(),
+});
+export type AccountProfile = z.infer<typeof accountProfileSchema>;
+// The sign-in fields describe the active account: the one new runs and terminals use.
 export const accountStateSchema = z.object({
   loggedIn: z.boolean(),
   authMethod: z.string().optional(),
@@ -33,6 +46,8 @@ export const accountStateSchema = z.object({
   // Present while the official sign-in command waits for the code shown after browser authorization.
   login: z.object({ url: z.url() }).nullable(),
   notice: z.string().optional(),
+  profile: accountProfile.optional(),
+  profiles: z.array(accountProfileSchema).optional(),
 });
 export type AccountState = z.infer<typeof accountStateSchema>;
 // The part of the official CLI's user settings the GUI edits. null means unset: the CLI's own default applies.
@@ -327,6 +342,10 @@ export const commandSchema = z.discriminatedUnion('type', [
     .strict(),
   z.object({ type: z.literal('account.cancel'), ...request }).strict(),
   z.object({ type: z.literal('account.logout'), ...request }).strict(),
+  // Chooses the account for runs and terminals started from now on; running ones keep theirs.
+  z.object({ type: z.literal('account.use'), ...request, profile: accountProfile }).strict(),
+  // Creates an account, signed out, and makes it the active one.
+  z.object({ type: z.literal('account.add'), ...request, profile: accountProfile }).strict(),
   z.object({ type: z.literal('settings.get'), ...request }).strict(),
   z
     .object({
@@ -519,6 +538,8 @@ export const terminalInfoSchema = z.object({
   // Whether a client is showing it.
   attached: z.boolean(),
   since: timestamp,
+  // The account its CLI runs as.
+  profile: accountProfile.optional(),
 });
 export type TerminalInfo = z.infer<typeof terminalInfoSchema>;
 export const serverMessageSchema = z.discriminatedUnion('type', [

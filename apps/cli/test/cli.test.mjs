@@ -339,6 +339,62 @@ test('the agent list opens, ends and leaves agents with confirmation', async () 
   assert.deepEqual(await chosen, { quit: true });
 });
 
+test('the account list switches and adds the account new agents use', async () => {
+  const sessions = [
+    { id: SESSION, projectPath: '/p', title: 'one', updatedAt: new Date().toISOString() },
+  ];
+  const connection = fakeConnection(sessions);
+  const tty = fakeTty();
+  const deck = new Deck(connection, { ...tty, cwd: '/p', home: '/home/u' });
+  const chosen = deck.choose();
+  assert.deepEqual(connection.requests.at(-1), { type: 'account.status' });
+  // A service with one account has no list.
+  tty.input.emit('data', Buffer.from('a'));
+  assert.match(tty.output.written, /不支持多账号/);
+  const state = (profile) => ({
+    type: 'account.state',
+    loggedIn: true,
+    login: null,
+    profile,
+    profiles: [
+      { profile: 'default', loggedIn: true, email: 'a@example.invalid', subscriptionType: 'pro' },
+      { profile: 'work', loggedIn: false },
+    ],
+  });
+  connection.emit(state('default'));
+  connection.emit({
+    type: 'terminals.state',
+    terminals: [
+      {
+        terminalId: TERMINAL,
+        sessionId: SESSION,
+        status: 'idle',
+        attached: false,
+        since: new Date().toISOString(),
+        profile: 'default',
+      },
+    ],
+  });
+  assert.match(tty.output.written, /账号 default/);
+  tty.output.written = '';
+  tty.input.emit('data', Buffer.from('a'));
+  assert.match(tty.output.written, /a@example\.invalid/);
+  assert.match(tty.output.written, /未登录/);
+  tty.input.emit('data', Buffer.from('j\r'));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(connection.requests.at(-1), { type: 'account.use', profile: 'work' });
+  assert.match(tty.output.written, /已切换到账号 work.*还没登录/);
+  // An agent started as the previous account is marked.
+  connection.emit(state('work'));
+  assert.match(tty.output.written, /one +@default/);
+
+  tty.input.emit('data', Buffer.from('anlab\r'));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(connection.requests.at(-1), { type: 'account.add', profile: 'lab' });
+  tty.input.emit('data', Buffer.from('\r'));
+  assert.deepEqual(await chosen, { sessionId: SESSION, continued: true });
+});
+
 test('worktrees sit beside their repository, group with it, and go only when clean', async (t) => {
   const base = await realpath(await mkdtemp(join(tmpdir(), 'ccdt-git-')));
   t.after(() => rm(base, { recursive: true, force: true }));
