@@ -4,6 +4,7 @@ import { basename, resolve } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { addWorktree, ownWorktree, removeWorktree, repositoryOf } from './git.mjs';
 import { newlyWaiting, notify } from './notify.mjs';
+import { directoryCandidates, freshTitle, tilde, untilde } from './paths.mjs';
 
 // Cells a text takes in a terminal: East Asian wide characters take two. The list draws only characters whose width
 // is not ambiguous, as glyphs like ● overlap their neighbours in some terminals.
@@ -55,8 +56,6 @@ export function ago(time, now = Date.now()) {
   if (seconds < 86400) return `${Math.floor(seconds / 3600)} 小时前`;
   return `${Math.floor(seconds / 86400)} 天前`;
 }
-const tilde = (path, home) =>
-  path === home || path.startsWith(`${home}/`) ? `~${path.slice(home.length)}` : path;
 
 // Label and SGR colour of what an agent is doing.
 const STATUS = {
@@ -269,6 +268,7 @@ export class Deck {
   key(key) {
     const mode = this.mode;
     if (mode?.type === 'accounts') return this.accountKey(mode, key);
+    if (mode?.type === 'form') return this.formKey(mode, key);
     if (mode?.type === 'confirm') {
       this.mode = null;
       if (key === 'y' || key === 'Y') mode.yes();
@@ -307,11 +307,17 @@ export class Deck {
         return;
       case 'n':
         this.mode = {
-          type: 'prompt',
-          label: '新 agent 的目录：',
-          value: tilde(item?.session.projectPath ?? this.cwd, this.home),
-          submit: (path) => this.create(path),
+          type: 'form',
+          field: 'title',
+          title: '',
+          path: tilde(item?.session.projectPath ?? this.cwd, this.home),
+          candidates: [],
+          picked: -1,
         };
+        this.lookUp(this.mode, '');
+        return;
+      case 'N':
+        void this.create(item?.session.projectPath ?? this.cwd);
         return;
       case 'd':
         if (!item?.terminal) return void (this.message = '这个会话没有运行中的 agent。');
@@ -438,6 +444,56 @@ export class Deck {
         this.mode = null;
     }
   }
+  // The new-agent form: a name, then a directory chosen from the known ones or completed from this computer's.
+  formKey(form, key) {
+    const onPath = form.field === 'path';
+    const edit = (value) => {
+      if (!onPath) return void (form.title = value);
+      form.path = value;
+      this.lookUp(form, value);
+    };
+    const pick = (index) => {
+      form.picked = index;
+      form.path = form.candidates[index];
+    };
+    if (key === '\x1b' || key === '\x03') this.mode = null;
+    else if (key === '\r') {
+      if (!onPath) form.field = 'path';
+      else {
+        this.mode = null;
+        void this.create(form.path.trim(), form.title.trim() || undefined);
+      }
+    } else if (key === '\t') {
+      if (!onPath) form.field = 'path';
+      else if (form.candidates.length) edit(`${form.candidates[Math.max(0, form.picked)]}/`);
+    } else if (key === '\x1b[Z') form.field = 'title';
+    else if (key === '\x1b[B' || key === '\x1bOB') {
+      if (!onPath) form.field = 'path';
+      else if (form.candidates.length) pick(Math.min(form.candidates.length - 1, form.picked + 1));
+    } else if (key === '\x1b[A' || key === '\x1bOA') {
+      if (onPath && form.picked > 0) pick(form.picked - 1);
+      else form.field = 'title';
+    } else if (key === '\x15') edit('');
+    else if (key === '\x7f' || key === '\b')
+      edit([...(onPath ? form.path : form.title)].slice(0, -1).join(''));
+    else if (!key.startsWith('\x1b') && key >= ' ') edit((onPath ? form.path : form.title) + key);
+  }
+  // Fills the form's directory list for what is typed; a slower answer for older text is dropped.
+  lookUp(form, typed) {
+    form.picked = -1;
+    const recent = [...this.sessions.values()]
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+      .map((session) => session.projectPath);
+    const lookup = (this.lookup = directoryCandidates(typed, {
+      home: this.home,
+      cwd: this.cwd,
+      recent: [...recent, this.cwd],
+    }).then((candidates) => {
+      if (this.lookup !== lookup || this.mode !== form) return;
+      form.candidates = candidates;
+      if (this.shown) this.render();
+    }));
+  }
   async remove(sessionId, worktree) {
     if (worktree)
       try {
@@ -460,21 +516,26 @@ export class Deck {
     }
     return this.create(path, branch);
   }
-  // A new session for a directory on this computer, opened at once.
+  // A new session for a directory on this computer, opened at once. Without a title it takes the directory's name,
+  // numbered when the directory already has a session of that name.
   async create(path, title) {
     if (!path) return;
-    const expanded = path === '~' || path.startsWith('~/') ? this.home + path.slice(1) : path;
     let projectPath;
     try {
-      projectPath = await realpath(resolve(this.cwd, expanded));
+      projectPath = await realpath(resolve(this.cwd, untilde(path, this.home)));
       if (!(await stat(projectPath)).isDirectory()) throw new Error();
     } catch {
       return this.notice(`不是可用的目录：${path}`);
     }
+    const taken = new Set(
+      [...this.sessions.values()]
+        .filter((session) => session.projectPath === projectPath)
+        .map((session) => session.title),
+    );
     try {
       const { sessionId } = await this.connection.request({
         type: 'session.create',
-        title: (title ?? basename(projectPath)).slice(0, 120) || projectPath.slice(-120),
+        title: (title ?? freshTitle(basename(projectPath) || projectPath, taken)).slice(0, 120),
         projectPath,
       });
       this.selected = sessionId;
@@ -548,7 +609,34 @@ export class Deck {
         });
       });
     }
-    const room = height - 5;
+    // The lines under the list: the message, a prompt, or the new-agent form with its directories.
+    const mode = this.mode;
+    const panel = [];
+    if (mode?.type === 'form') {
+      const field = (name, label, value, placeholder) => {
+        const on = mode.field === name;
+        const shown = fit(value, width - 11).trimEnd();
+        panel.push({
+          text: ` ${on ? '>' : ' '} \x1b[${on ? 1 : 2}m${label}\x1b[0m  ${shown || `\x1b[2m${placeholder}\x1b[0m`}`,
+          cursor: on ? 10 + cellWidth(shown) : null,
+        });
+      };
+      panel.push({ text: ' \x1b[1m新建 agent\x1b[0m' });
+      field('title', '名字', mode.title, '留空则用目录名');
+      field('path', '目录', mode.path, '输入目录，Tab 补全');
+      if (mode.field === 'path')
+        mode.candidates.forEach((candidate, index) =>
+          panel.push({
+            text: `         ${index === mode.picked ? '\x1b[7m' : '\x1b[2m'}${fit(candidate, width - 11)}\x1b[0m`,
+          }),
+        );
+    } else if (mode?.type === 'confirm')
+      panel.push({ text: ` \x1b[33m${fit(mode.text, width - 2)}\x1b[0m` });
+    else if (mode && mode.type !== 'accounts') {
+      const text = fit(mode.label + mode.value, width - 3).trimEnd();
+      panel.push({ text: ` ${text}`, cursor: 2 + cellWidth(text) });
+    } else panel.push({ text: ` ${fit(this.message, width - 2)}` });
+    const room = Math.max(1, height - 4 - panel.length);
     const at = Math.max(
       0,
       body.findIndex((line) => line.selected),
@@ -560,22 +648,22 @@ export class Deck {
     );
     this.offset = Math.max(0, this.offset);
     lines.push(...body.slice(this.offset, this.offset + room).map((line) => line.text));
-    while (lines.length < height - 2) lines.push('');
-    const mode = this.mode;
+    while (lines.length < height - 1 - panel.length) lines.push('');
     let cursor = null;
-    if (mode?.type === 'confirm') lines.push(` \x1b[33m${fit(mode.text, width - 2)}\x1b[0m`);
-    else if (mode?.type === 'accounts') lines.push(` ${fit(this.message, width - 2)}`);
-    else if (mode) {
-      const text = fit(mode.label + mode.value, width - 3).trimEnd();
-      lines.push(` ${text}`);
-      cursor = [lines.length, 2 + cellWidth(text)];
-    } else lines.push(` ${fit(this.message, width - 2)}`);
+    for (const line of panel) {
+      lines.push(line.text);
+      if (line.cursor != null) cursor = [lines.length, line.cursor];
+    }
     const keys =
-      mode?.type === 'accounts'
-        ? 'Enter 切换  n 新建账号  Esc 返回'
-        : mode
-          ? 'Enter 确认  Esc 取消'
-          : `Enter 进入  n 新建  w worktree  d 结束  x 删除  r 改名  a 账号  / 搜索  q 退出${width >= 106 ? '  |  Ctrl+Q 从 agent 回到这里' : ''}`;
+      mode?.type === 'form'
+        ? mode.field === 'title'
+          ? 'Enter 下一项  Esc 取消'
+          : 'Enter 创建并进入  Tab 补全  上下 选目录  Shift+Tab 回到名字  Ctrl+U 清空  Esc 取消'
+        : mode?.type === 'accounts'
+          ? 'Enter 切换  n 新建账号  Esc 返回'
+          : mode
+            ? 'Enter 确认  Esc 取消'
+            : `Enter 进入  n 新建  N 快速新建  w worktree  d 结束  x 删除  r 改名  a 账号  / 搜索  q 退出${width >= 120 ? '  |  Ctrl+Q 从 agent 回到这里' : ''}`;
     lines.push(` \x1b[2m${fit(keys, width - 2)}\x1b[0m`);
     this.output.write(
       '\x1b[H' +

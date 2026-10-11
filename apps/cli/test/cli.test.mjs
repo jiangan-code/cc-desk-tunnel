@@ -11,6 +11,7 @@ import { attachTerminal, inputFrames } from '../src/terminal.mjs';
 import { Deck, cellWidth, deckRows, fit } from '../src/deck.mjs';
 import { addWorktree, ownWorktree, removeWorktree, repositoryOf } from '../src/git.mjs';
 import { newlyWaiting } from '../src/notify.mjs';
+import { directoryCandidates, freshTitle } from '../src/paths.mjs';
 import { execFileSync } from 'node:child_process';
 import { realpath } from 'node:fs/promises';
 
@@ -393,6 +394,58 @@ test('the account list switches and adds the account new agents use', async () =
   assert.deepEqual(connection.requests.at(-1), { type: 'account.add', profile: 'lab' });
   tty.input.emit('data', Buffer.from('\r'));
   assert.deepEqual(await chosen, { sessionId: SESSION, continued: true });
+});
+
+test('a new agent takes a name, then a directory picked from recent ones or completed', async (t) => {
+  const home = await realpath(await mkdtemp(join(tmpdir(), 'ccdt-new-')));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  for (const name of ['alpha', 'beta', '.hidden'])
+    await mkdir(join(home, 'Dev', name), { recursive: true });
+  await writeFile(join(home, 'Dev', 'notes.txt'), '');
+  const beta = join(home, 'Dev', 'beta');
+  const look = (typed) => directoryCandidates(typed, { home, cwd: home, recent: [beta, '/srv'] });
+  assert.deepEqual(await look(''), ['~/Dev/beta', '/srv']);
+  assert.deepEqual(await look('~/Dev/'), ['~/Dev/beta', '~/Dev/alpha']);
+  assert.deepEqual(await look('~/Dev/A'), ['~/Dev/alpha']);
+  assert.deepEqual(await look('~/nowhere/'), []);
+  assert.equal(freshTitle('beta', new Set(['beta', 'beta 2'])), 'beta 3');
+
+  const sessions = [
+    { id: SESSION, projectPath: beta, title: 'beta', updatedAt: new Date().toISOString() },
+  ];
+  const connection = fakeConnection(sessions);
+  const tty = fakeTty();
+  const deck = new Deck(connection, { ...tty, cwd: home, home });
+  let chosen = deck.choose();
+  const type = (text) => tty.input.emit('data', Buffer.from(text));
+  type('n');
+  assert.match(tty.output.written, /新建 agent/);
+  type('修复登录\r');
+  await deck.lookup;
+  // Arrows walk the directories offered: the recent ones first.
+  type('\x1b[B');
+  assert.equal(deck.mode.path, '~/Dev/beta');
+  type('\x15~/Dev/a');
+  await deck.lookup;
+  type('\t');
+  assert.equal(deck.mode.path, '~/Dev/alpha/');
+  type('\r');
+  assert.deepEqual(await chosen, { sessionId: SESSION, continued: false });
+  assert.deepEqual(connection.requests.at(-1), {
+    type: 'session.create',
+    title: '修复登录',
+    projectPath: join(home, 'Dev', 'alpha'),
+  });
+
+  // N opens one at once in the selected agent's directory, numbered after its namesake.
+  chosen = deck.choose();
+  type('N');
+  assert.deepEqual(await chosen, { sessionId: SESSION, continued: false });
+  assert.deepEqual(connection.requests.at(-1), {
+    type: 'session.create',
+    title: 'beta 2',
+    projectPath: beta,
+  });
 });
 
 test('worktrees sit beside their repository, group with it, and go only when clean', async (t) => {
