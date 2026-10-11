@@ -24,6 +24,7 @@ const USAGE = `用法：
   ccdt [目录]            在目录（默认当前目录）上打开远端原版 Claude Code
   ccdt deck [目录]       先打开 agent 列表
   ccdt ls [目录]         列出 agent 和它们此刻的状态（需要后台服务）；--json 输出 JSON
+  ccdt rm <会话 ID>…     删除已停止的 agent 和它的对话（需要后台服务）
   ccdt daemon install    装成 systemd 用户服务：关掉终端 agent 也继续运行
   ccdt daemon status | stop | uninstall
   ccdt login             保存服务地址、证书指纹和服务凭据
@@ -89,6 +90,10 @@ export async function main(argv) {
     if (positionals[0] === 'ls') {
       if (positionals.length > 2) throw new UsageError('只能指定一个目录。');
       return await list(positionals[1], values);
+    }
+    if (positionals[0] === 'rm') {
+      if (positionals.length < 2) throw new UsageError('请给出要删除的会话 ID（见 ccdt ls）。');
+      return await remove(positionals.slice(1));
     }
     const deck = positionals[0] === 'deck';
     if (deck) positionals.shift();
@@ -413,6 +418,38 @@ async function list(directory, values) {
   } finally {
     connection.close();
   }
+}
+
+// `ccdt rm`: deletes agents the way the list does, through the daemon for the same reason as `ccdt ls`.
+async function remove(ids) {
+  if (!(await daemonRunning()))
+    throw new Error('ccdt rm 需要后台服务；请先运行 ccdt daemon install。');
+  const connection = await openConnection(`ws+unix://${daemonSocket()}:/`, null);
+  try {
+    for (const agent of await removeAgents(connection, ids))
+      console.log(`已删除：${agent.title}\t${agent.id}`);
+    return 0;
+  } finally {
+    connection.close();
+  }
+}
+
+// Deletes sessions and their conversations, only once every one of them is stopped: a running agent is ended
+// first, so a script cannot take a session from under a terminal. Nothing is deleted when any ID fails the check.
+export async function removeAgents(connection, ids, options) {
+  const agents = new Map(
+    (await listAgents(connection, undefined, options)).map((agent) => [agent.id, agent]),
+  );
+  const chosen = [...new Set(ids)].map((id) => {
+    const agent = agents.get(id);
+    if (!agent) throw new Error(`没有这个会话：${id}`);
+    if (agent.status !== 'stopped')
+      throw new Error(`${agent.title}（${id}）还在运行（${agent.status}），先结束它再删除。`);
+    return agent;
+  });
+  for (const agent of chosen)
+    await connection.request({ type: 'session.delete', sessionId: agent.id });
+  return chosen;
 }
 
 // Sessions (of one directory, when given) with their terminal's status: starting, busy, waiting or idle, and

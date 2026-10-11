@@ -12,7 +12,7 @@
 - `ccdt` worktree 隔离：列表里按 `w` 为当前仓库新建 git worktree 并在其中开 agent，删除会话时一并清理（有未提交改动时拒绝）；列表按仓库分组并显示分支。agent 开始等你时发桌面通知。见 [apps/cli](apps/cli/README.md#worktree-隔离)。
 - `ccdt` 后台常驻：`ccdt daemon install` 装成 systemd 用户服务，持有连接和执行通道；关掉终端 agent 照常运行，任何终端里再运行 `ccdt` 都能接回。见 [apps/cli](apps/cli/README.md#后台常驻)。
 - `ccdt` 多 agent：在 Claude Code 里按 Ctrl+Q 回到 agent 列表，agent 在服务端继续运行。列表按项目分组，显示运行中 / 等你 / 空闲，可以进入、新建、结束、删除、改名和搜索；看不到的 agent 等你时响铃并显示在窗口标题上。服务端允许不同会话的终端同时运行（每台设备最多 8 个），再次进入时还原整屏画面。见 [apps/cli](apps/cli/README.md#多个-agent)。
-- `ccdt` 由脚本管理 agent：`--single` 只跑一个 agent 并与它同进退，`--name` 给新会话起名，`ccdt ls [目录] --json` 列出 agent 和它们的状态。只改客户端，协议不变。见 [apps/cli](apps/cli/README.md#由脚本管理-agent)。
+- `ccdt` 由脚本管理 agent：`--single` 只跑一个 agent 并与它同进退，`--name` 给新会话起名，`ccdt ls [目录] --json` 列出 agent 和它们的状态，`ccdt rm <会话 ID>…` 删除已停止的 agent。只改客户端，协议不变。见 [apps/cli](apps/cli/README.md#由脚本管理-agent)。
 - `ccdt` 重新打开时接着这个目录最近的一段对话（`claude --continue`），不再每次都是新对话；`-n` 从空白开始。
 - 修复：`ccdt` 连接时，Claude 收到的提示词里定时任务文件路径显示为 `undefined`。
 - 服务端生成的 SSH 配置关闭 OpenSSH 10.1+ 对非后量子密钥交换的逐条警告（连接始终在已验证的 TLS 内），避免它混入每条命令的输出。

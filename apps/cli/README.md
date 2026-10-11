@@ -43,6 +43,7 @@ ccdt deck          # 先打开 agent 列表
 
 - `ccdt <目录> -n --single --name <名字>`：新建一个会话并只显示它。agent 退出时 ccdt 以相同退出码退出；ccdt 被结束（关掉终端或窗格、`SIGTERM`、`SIGHUP`）时先结束这个 agent，即使后台服务在运行，5 秒内服务端没回应也照样退出。Ctrl+Q 直接交给 Claude Code，不回到列表。
 - `ccdt ls [目录] [--json]`：列出 agent（给了目录就只列这个目录的）和它们此刻的状态：`starting`、`busy`（运行中）、`waiting`（等你）、`idle`（空闲）、`stopped`（没有在运行）。需要后台服务：单独的连接会占用执行设备，关闭时还会结束 agent。
+- `ccdt rm <会话 ID>…`：删除 agent 和它在服务端的对话，与列表里的删除相同。只删已经 `stopped` 的：有一个还在运行或不存在，就一个也不删。会话 ID 见 `ccdt ls` 的最后一列。需要后台服务。
 
 ## 后台常驻
 
