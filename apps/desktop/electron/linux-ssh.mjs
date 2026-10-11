@@ -1,6 +1,23 @@
 import { spawn } from 'node:child_process';
 import { homedir, userInfo } from 'node:os';
 
+// The only variables a command may carry from the service: which CLI session sent it, and what a terminal launch set
+// (the protocol's LAUNCH_ENV_NAME). The session id arrives under the CLI's own name and is exported as
+// CCDT_REMOTE_SESSION_ID, so a local Claude Code started from that shell never mistakes it for its own.
+const LAUNCH_ENV_NAME = /^(FM|CCDT)_[A-Z0-9_]{1,64}$/;
+export function acceptedEnvironment(key, value) {
+  if (
+    typeof key !== 'string' ||
+    typeof value !== 'string' ||
+    value.length > 4096 ||
+    value.includes('\0')
+  )
+    return null;
+  if (key === 'CLAUDE_CODE_SESSION_ID') return ['CCDT_REMOTE_SESSION_ID', value];
+  if (key === 'CCDT_REMOTE_SESSION_ID') return null;
+  return LAUNCH_ENV_NAME.test(key) ? [key, value] : null;
+}
+
 // A per-connection SSH exec endpoint, owned by the desktop user. No password,
 // forwarding, PTY, SFTP or interactive shell is exposed.
 export async function startLinuxSsh() {
@@ -41,10 +58,17 @@ export async function startLinuxSsh() {
     client.on('ready', () =>
       client.on('session', (accept) => {
         const session = accept();
+        const env = {};
+        session.on('env', (accept, reject, info) => {
+          const entry = acceptedEnvironment(info.key, info.val);
+          if (entry) env[entry[0]] = entry[1];
+          (entry ? accept : reject)?.();
+        });
         session.on('exec', (accept, _reject, info) => {
           const stream = accept();
           const child = spawn('/bin/bash', ['-c', info.command], {
             cwd: homedir(),
+            env: { ...process.env, ...env },
             detached: true,
             stdio: ['pipe', 'pipe', 'pipe'],
           });

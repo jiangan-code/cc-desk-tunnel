@@ -24,7 +24,7 @@ sudo apt install ./artifacts/linux/CC-Desk-Tunnel-0.2.5-amd64.deb
 
 在程序里填写可信远端服务的 WSS 地址、证书指纹和服务凭据，再选择本机绝对项目路径。
 
-**客户端与服务端必须一起使用本次代码（协议 12）。** 旧协议会明确拒绝连接。Linux 当前使用 deb 覆盖升级；服务端提供的 Windows exe 自升级不适用于 Linux。现有用户数据保持在 Electron 的 userData 目录（通常为 `~/.config/CC Desk Tunnel`，服从 XDG 配置），实际计划任务路径随握手传给服务端。
+**客户端与服务端必须一起使用本次代码（协议 13）。** 旧协议会明确拒绝连接。Linux 当前使用 deb 覆盖升级；服务端提供的 Windows exe 自升级不适用于 Linux。现有用户数据保持在 Electron 的 userData 目录（通常为 `~/.config/CC Desk Tunnel`，服从 XDG 配置），实际计划任务路径随握手传给服务端。
 
 ## 终端客户端
 
@@ -37,6 +37,7 @@ Linux 客户端在认证时声明 `tunnelTransport=relay`。服务端不启动 f
 - 只用控制端口：不需要公网 7000 端口，nginx 模式下中继与控制连接同走 `location = /ws`，配置无需改动。
 - 每条 SSH 连接独占一条 WebSocket，背压沿 TCP 与 WebSocket 自然传递，大输出不会阻塞控制通道或其他命令。
 - 密钥错误的中继连接按错误凭据计入来源地址的登录限速；中继池满时多余连接被拒绝；连接结束（主动退出，或断线超过宽限期）即关闭全部中继、监听和临时 SSH 配置。
+- 命令带着发出它的会话身份：服务端的 SSH 配置 `SendEnv CLAUDE_CODE_SESSION_ID FM_* CCDT_*`，桌面端的 SSH 端点只接受这些名字（其余一律拒绝，值不超过 4096 字符），把会话 ID 改名为 `CCDT_REMOTE_SESSION_ID` 交给命令，`FM_*` / `CCDT_*` 原样交给命令；`CCDT_REMOTE_SESSION_ID` 本身不能直接发送。
 - 服务端的 SSH 配置用 `ControlMaster` 让所有命令共用一条 SSH 连接：经中继每次握手要往返桌面好几趟，远端服务上约 1.5 秒；复用后一条命令只开一个通道，约 0.4 秒。这条连接随中继结束。
 
 ## 断线续接

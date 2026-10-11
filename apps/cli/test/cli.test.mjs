@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { clearConfig, desktopLogin, loadConfig, saveConfig } from '../src/config.mjs';
 import { environmentProxy } from '../src/environment.mjs';
-import { chooseSession } from '../src/main.mjs';
+import { chooseSession, launchOptions } from '../src/main.mjs';
 import { attachTerminal, inputFrames } from '../src/terminal.mjs';
 import { Deck, cellWidth, deckRows, fit } from '../src/deck.mjs';
 import { addWorktree, ownWorktree, removeWorktree, repositoryOf } from '../src/git.mjs';
@@ -229,6 +229,28 @@ test('the directory resumes its latest session unless a new one is asked for', a
     title: 'p',
     projectPath: '/p',
   });
+
+  connection = fakeConnection(sessions);
+  assert.equal(
+    (await chooseSession(connection, '/p', { new: true, name: ' fm-task-1 ' })).title,
+    'fm-task-1',
+  );
+  assert.equal(connection.requests[0].title, 'fm-task-1');
+});
+
+test('launch options become the terminal launch; only FM_* and CCDT_* variables are taken', () => {
+  assert.equal(launchOptions({}), undefined);
+  assert.deepEqual(
+    launchOptions({
+      prompt: 'go',
+      'append-system-prompt': 'worker',
+      env: ['FM_TASK_ID=t1', 'CCDT_X=a=b'],
+    }),
+    { prompt: 'go', appendSystemPrompt: 'worker', env: { FM_TASK_ID: 't1', CCDT_X: 'a=b' } },
+  );
+  for (const env of ['PATH=/x', 'FM_TASK_ID', '=v'])
+    assert.throws(() => launchOptions({ env: [env] }), /FM_\* 或 CCDT_\*/, env);
+  assert.throws(() => launchOptions({ prompt: '' }), /--prompt/);
 });
 
 test('Ctrl+Q leaves the agent running: input before it is sent, the terminal is detached', async () => {

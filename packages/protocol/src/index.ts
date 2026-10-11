@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-export const PROTOCOL_VERSION = 12;
+export const PROTOCOL_VERSION = 13;
 export const MAX_FRAME_BYTES = 256 * 1024;
 const id = z.uuid();
 const timestamp = z.iso.datetime();
@@ -8,6 +8,19 @@ export const permissionModeSchema = z.enum(['auto', 'default', 'plan', 'acceptEd
 export type PermissionMode = z.infer<typeof permissionModeSchema>;
 export const effortSchema = z.enum(['low', 'medium', 'high', 'xhigh', 'max']);
 export type Effort = z.infer<typeof effortSchema>;
+// Variables a launch may set for the CLI. Only these prefixes are accepted, so a launch cannot redirect the CLI's own
+// configuration (its provider, account or settings); the SSH tunnel forwards the same names to the desktop.
+export const LAUNCH_ENV_NAME = /^(FM|CCDT)_[A-Z0-9_]{1,64}$/;
+export const terminalLaunchSchema = z
+  .object({
+    // The first user message, sent as soon as the CLI starts.
+    prompt: z.string().min(1).max(100_000).optional(),
+    // Appended after the service's own system prompt.
+    appendSystemPrompt: z.string().min(1).max(100_000).optional(),
+    env: z.record(z.string().regex(LAUNCH_ENV_NAME), z.string().max(4096)).optional(),
+  })
+  .strict();
+export type TerminalLaunch = z.infer<typeof terminalLaunchSchema>;
 export const modelInfoSchema = z.object({
   value: z.string(),
   displayName: z.string(),
@@ -413,6 +426,8 @@ export const commandSchema = z.discriminatedUnion('type', [
       rows: z.number().int().min(5).max(160),
       // Picks up the session's latest native conversation, if it has one, instead of starting a new one.
       continue: z.boolean().optional(),
+      // How a newly started CLI is launched; ignored when the session's terminal is already running.
+      launch: terminalLaunchSchema.optional(),
     })
     .strict(),
   z

@@ -112,6 +112,9 @@ export function sshConfig(
       '  ServerAliveCountMax 2',
       '  ForwardAgent no',
       '  ClearAllForwardings yes',
+      // Tells the Linux desktop which CLI session sent a command, plus the variables a terminal launch set
+      // (LAUNCH_ENV_NAME); it accepts exactly these names. Windows OpenSSH is not sent any.
+      ...(linux ? ['  SendEnv CLAUDE_CODE_SESSION_ID FM_* CCDT_*'] : []),
       // The Linux desktop's SSH implementation has no post-quantum key exchange, which OpenSSH 10.1+ reports on every
       // command's stderr. The connection only ever runs inside the service's verified TLS, which carries that concern.
       '  IgnoreUnknown WarnWeakCrypto',

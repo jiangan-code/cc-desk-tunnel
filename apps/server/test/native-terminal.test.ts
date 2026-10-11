@@ -272,3 +272,22 @@ test('official sign-in: the link is read from the command output, the pasted cod
     authMethod: 'none',
   });
 });
+
+test('a terminal launch appends to the system prompt and ends with its first message', () => {
+  const session = {
+    id: '11111111-1111-4111-8111-111111111111',
+    projectPath: '/home/user/p',
+    permissionMode: 'auto',
+  } as Session;
+  const ssh = { platform: 'linux', configPath: '/ssh' } as never;
+  const args = terminalArguments({ executable: 'claude' }, session, ssh, false, {
+    prompt: '-starts with a dash',
+    appendSystemPrompt: 'You are a task worker.',
+  });
+  const system = args[args.indexOf('--append-system-prompt') + 1];
+  assert.ok(system.startsWith('The user projects are on the connected Linux desktop'));
+  assert.ok(system.endsWith('\n\nYou are a task worker.'));
+  assert.equal(args.filter((arg) => arg === '--append-system-prompt').length, 1);
+  assert.deepEqual(args.slice(-2), ['--', '-starts with a dash']);
+  assert.ok(!terminalArguments({ executable: 'claude' }, session, ssh).includes('--'));
+});

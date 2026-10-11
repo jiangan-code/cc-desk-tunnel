@@ -1,6 +1,6 @@
 import { spawn as spawnPty } from 'node-pty';
 import type { IPty } from 'node-pty';
-import type { Session } from '@cc-desk-tunnel/protocol';
+import type { Session, TerminalLaunch } from '@cc-desk-tunnel/protocol';
 import type { ClaudeOptions } from './claude.ts';
 import { remotePrompt } from './claude.ts';
 import type { SshConnection } from './tunnel.ts';
@@ -45,16 +45,20 @@ export function terminalArguments(
   session: Session,
   ssh: SshConnection,
   continued = false,
+  launch: TerminalLaunch = {},
 ) {
+  const system = remotePrompt(session.projectPath, ssh, session.id);
   return [
     ...(continued ? ['--continue'] : []),
     '--permission-mode',
     session.permissionMode === 'default' ? 'manual' : session.permissionMode,
     '--append-system-prompt',
-    remotePrompt(session.projectPath, ssh, session.id),
+    launch.appendSystemPrompt ? `${system}\n\n${launch.appendSystemPrompt}` : system,
     ...((session.model ?? options.model) ? ['--model', session.model ?? options.model!] : []),
     ...(session.effort ? ['--effort', session.effort] : []),
     ...(options.settingsPath ? ['--settings', options.settingsPath] : []),
+    // After `--`, a prompt that starts with a dash is still the prompt.
+    ...(launch.prompt ? ['--', launch.prompt] : []),
   ];
 }
 

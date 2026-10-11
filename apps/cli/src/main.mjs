@@ -2,7 +2,7 @@ import { realpath, stat } from 'node:fs/promises';
 import { basename, resolve } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { parseArgs } from 'node:util';
-import { effortSchema, permissionModeSchema } from '@cc-desk-tunnel/protocol';
+import { effortSchema, LAUNCH_ENV_NAME, permissionModeSchema } from '@cc-desk-tunnel/protocol';
 import { controlTlsOptions, openProxyBridge } from '../../desktop/electron/proxy-bridge.mjs';
 import { clearConfig, configDirectory, desktopLogin, loadConfig, saveConfig } from './config.mjs';
 import { openConnection } from './connection.mjs';
@@ -31,9 +31,16 @@ const USAGE = `用法：
 
 选项：
   -n, --new                      新建会话，而不是接着这个目录最近的对话
+      --name <名字>              新建会话的名字（默认用目录名）
   -m, --model <模型>             会话模型
       --effort <强度>            low / medium / high / xhigh / max
       --permission-mode <模式>   auto / default / plan / acceptEdits
+
+启动选项（只在这次新启动 Claude Code 时生效；会话已在运行时忽略）：
+      --prompt <文本>            启动后立即发送的第一条消息
+      --append-system-prompt <文本>  追加在服务端系统提示之后
+      --env <名=值>              给这次的 Claude Code 及它经隧道在本机执行的命令设置变量，可重复；
+                                 名字只能是 FM_* 或 CCDT_*
 
 login 选项：--url <wss://…> --fingerprint <SHA256> --token-stdin（从标准输入读凭据）
 
@@ -55,6 +62,10 @@ export async function main(argv) {
       allowPositionals: true,
       options: {
         new: { type: 'boolean', short: 'n' },
+        name: { type: 'string' },
+        prompt: { type: 'string' },
+        'append-system-prompt': { type: 'string' },
+        env: { type: 'string', multiple: true },
         model: { type: 'string', short: 'm' },
         effort: { type: 'string' },
         'permission-mode': { type: 'string' },
@@ -225,6 +236,7 @@ async function run(directory, values) {
     throw new UsageError(`未知审批模式：${permissionMode}`);
   if (values.effort !== undefined && !effortSchema.safeParse(values.effort).success)
     throw new UsageError(`未知推理强度：${values.effort}`);
+  const launch = launchOptions(values);
   const projectPath = await realpath(resolve(directory)).catch(() => {
     throw new Error(`目录不存在：${directory}`);
   });
@@ -288,7 +300,7 @@ async function run(directory, values) {
     let next = null;
     if (!values.deck) {
       const session = await chooseSession(connection, projectPath, values);
-      next = { sessionId: session.id, continued: !values.new };
+      next = { sessionId: session.id, continued: !values.new, launch };
     }
     clearStatus();
     let message = '';
@@ -301,7 +313,10 @@ async function run(directory, values) {
       const title = deck.sessions.get(next.sessionId)?.title ?? '';
       deck.attached = next.sessionId;
       attached = true;
-      const terminal = attachTerminal(connection, next.sessionId, { continued: next.continued });
+      const terminal = attachTerminal(connection, next.sessionId, {
+        continued: next.continued,
+        launch: next.launch,
+      });
       let result;
       try {
         result = await terminal.exited;
@@ -328,6 +343,27 @@ async function run(directory, values) {
   }
 }
 
+// The launch part of `terminal.open`, or undefined when no launch option was given.
+export function launchOptions(values) {
+  const launch = {};
+  if (values.prompt !== undefined) {
+    if (!values.prompt) throw new UsageError('--prompt 不能为空。');
+    launch.prompt = values.prompt;
+  }
+  if (values['append-system-prompt'] !== undefined) {
+    if (!values['append-system-prompt']) throw new UsageError('--append-system-prompt 不能为空。');
+    launch.appendSystemPrompt = values['append-system-prompt'];
+  }
+  for (const assignment of values.env ?? []) {
+    const at = assignment.indexOf('=');
+    const name = at > 0 ? assignment.slice(0, at) : '';
+    if (!LAUNCH_ENV_NAME.test(name))
+      throw new UsageError(`--env 需要 名=值，名字只能是 FM_* 或 CCDT_*：${assignment}`);
+    (launch.env ??= {})[name] = assignment.slice(at + 1);
+  }
+  return Object.keys(launch).length ? launch : undefined;
+}
+
 // The most recently used session of the directory, or a new one.
 export async function chooseSession(connection, projectPath, values) {
   let session = values.new
@@ -336,14 +372,18 @@ export async function chooseSession(connection, projectPath, values) {
         .filter((candidate) => candidate.projectPath === projectPath)
         .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
   if (!session) {
+    const title =
+      values.name?.trim().slice(0, 120) ||
+      basename(projectPath).slice(0, 120) ||
+      projectPath.slice(-120);
     const { sessionId } = await connection.request({
       type: 'session.create',
-      title: basename(projectPath).slice(0, 120) || projectPath.slice(-120),
+      title,
       projectPath,
     });
     session = {
       id: sessionId,
-      title: basename(projectPath) || projectPath,
+      title,
       permissionMode: 'auto',
     };
   }

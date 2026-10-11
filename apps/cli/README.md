@@ -37,6 +37,24 @@ ccdt deck          # 先打开 agent 列表
 
 服务端登录了多个 Claude 账号时，按 `a` 打开账号列表：`Enter` 切换当前账号，`n` 新建账号。之后新开的 agent 用当前账号，运行中的不受影响，用的不是当前账号的会在名字后标出 `@账号名`。对话各账号共用：要让一个 agent 换号，按 `d` 结束它，再按 `Enter` 进入，就会以新账号接着原来的对话。新账号第一次进入 agent 时按 Claude Code 的提示登录。详见[多个 Claude 账号](../../docs/multi-account.md)。
 
+## 启动选项
+
+给脚本和编排工具拉起 agent 用，只在这次新启动 Claude Code 时生效；会话的 Claude Code 已在运行时只是接回，选项被忽略。
+
+```bash
+ccdt ~/code/myproject -n --name task-1 \
+  --append-system-prompt '你是一个任务 worker。' \
+  --env FM_TASK_ID=task-1 \
+  --prompt '读 ~/briefs/task-1.md 并开始。'
+```
+
+- `--prompt`：启动后立即发送的第一条消息。
+- `--append-system-prompt`：追加在服务端系统提示（告诉 Claude 经 SSH 在本机执行的那一段）之后。
+- `--env 名=值`：可重复，名字只能是 `FM_*` 或 `CCDT_*`。变量设给这次的 Claude Code，并随它经隧道在本机执行的每条命令一起到达本机。
+- `--name`：新建会话时的名字，默认用目录名。
+
+本机执行的每条命令还带着 `CCDT_REMOTE_SESSION_ID`（发出命令的 Claude Code 会话 ID），本机程序可以据此区分不同 agent。
+
 ## 后台常驻
 
 ```bash

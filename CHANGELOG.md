@@ -4,6 +4,8 @@
 
 ## 未发布
 
+- `ccdt` 启动选项，供脚本和编排工具拉起 agent：`--prompt`（第一条消息）、`--append-system-prompt`（追加在服务端系统提示之后）、`--env 名=值`（只限 `FM_*` / `CCDT_*`）和 `--name`（新会话名字）。只在新启动 Claude Code 时生效。见 [apps/cli](apps/cli/README.md#启动选项)。
+- Linux 执行通道带上会话身份：服务端的 SSH 配置发送 `CLAUDE_CODE_SESSION_ID` 和 `FM_*` / `CCDT_*`，桌面端只接受这些，会话 ID 以 `CCDT_REMOTE_SESSION_ID` 交给命令，本机程序据此知道命令来自哪个远端会话。**协议升到 13，服务端与所有客户端需一起升级。**
 - 多个 Claude 账号：服务端可以登录多个账号（官方 `CLAUDE_CONFIG_DIR`，每个账号一个配置目录），选定的当前账号用于之后新开的 agent 和运行；对话各账号共用，换号后可以接着同一段对话。`ccdt` 列表里按 `a` 切换或新建账号。协议增量扩展，未升版本，旧客户端照常可用。见[多个 Claude 账号](docs/multi-account.md)。
 - Linux 终端客户端 `ccdt`：在系统终端里直接使用远端原版 Claude Code，复用桌面客户端的连接桥与执行通道。见 [apps/cli](apps/cli/README.md)。deb 包自带 `/usr/bin/ccdt`，由包内 Electron 运行。
 - Linux 客户端的执行通道改走 WSS 中继：不再需要 frpc 和公网 7000 端口，nginx 配置不变。Windows 客户端仍用 frp。**协议升到 12，服务端与所有客户端需一起升级。**

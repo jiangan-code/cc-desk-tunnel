@@ -15,6 +15,12 @@ test('SSH config pins loopback target and host key, disallows interactive/agent 
   assert.match(files.config, /ForwardAgent no/);
   assert.match(files.config, /IgnoreUnknown WarnWeakCrypto\n {2}WarnWeakCrypto no/);
   assert.equal(files.knownHosts, '[127.0.0.1]:32123 ssh-ed25519 AAAATEST\n');
+  assert.doesNotMatch(files.config, /SendEnv/);
+});
+
+test('Linux SSH config sends the session id and launch variables', () => {
+  const files = sshConfig('/tmp/private', 32123, 'user', 'ssh-ed25519 AAAATEST', 'linux');
+  assert.match(files.config, /\n {2}SendEnv CLAUDE_CODE_SESSION_ID FM_\* CCDT_\*\n/);
 });
 test('context references native SSH configuration without inventing execution tools', () => {
   const prompt = remotePrompt(

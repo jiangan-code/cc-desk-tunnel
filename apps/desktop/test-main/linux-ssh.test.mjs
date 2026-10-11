@@ -6,7 +6,7 @@ import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import ssh2 from 'ssh2';
-import { startLinuxSsh } from '../electron/linux-ssh.mjs';
+import { acceptedEnvironment, startLinuxSsh } from '../electron/linux-ssh.mjs';
 import { pathKey, withProject, folderName, isInside } from '../src/paths.ts';
 const execute = promisify(execFile);
 
@@ -119,5 +119,67 @@ test(
     assert.ok(pid > 0);
     await server.close();
     assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
+  },
+);
+
+test('Linux SSH takes only the session id and launch variables', () => {
+  assert.deepEqual(acceptedEnvironment('CLAUDE_CODE_SESSION_ID', 'abc'), [
+    'CCDT_REMOTE_SESSION_ID',
+    'abc',
+  ]);
+  assert.deepEqual(acceptedEnvironment('FM_TASK_ID', 't1'), ['FM_TASK_ID', 't1']);
+  assert.deepEqual(acceptedEnvironment('CCDT_X', 'y'), ['CCDT_X', 'y']);
+  // The session id only ever comes from the CLI's own variable.
+  for (const key of ['CCDT_REMOTE_SESSION_ID', 'PATH', 'HOME', 'fm_task', 'FM_'])
+    assert.equal(acceptedEnvironment(key, 'v'), null, key);
+  assert.equal(acceptedEnvironment('FM_A', 'x'.repeat(4097)), null);
+});
+
+test(
+  'Linux SSH hands forwarded variables to the command',
+  { skip: process.platform !== 'linux' },
+  async (t) => {
+    const server = await startLinuxSsh();
+    const directory = await mkdtemp(join(tmpdir(), 'linux-ssh-env-test-'));
+    t.after(async () => {
+      await server.close();
+      await rm(directory, { recursive: true, force: true });
+    });
+    await writeFile(join(directory, 'key'), server.privateKey, { mode: 0o600 });
+    await writeFile(
+      join(directory, 'known'),
+      `[127.0.0.1]:${server.port} ${server.hostPublicKey}\n`,
+    );
+    const { stdout } = await execute(
+      'ssh',
+      [
+        '-F',
+        '/dev/null',
+        '-p',
+        String(server.port),
+        '-i',
+        join(directory, 'key'),
+        '-o',
+        'IdentitiesOnly=yes',
+        '-o',
+        'BatchMode=yes',
+        '-o',
+        `UserKnownHostsFile=${join(directory, 'known')}`,
+        '-o',
+        'SendEnv=CLAUDE_CODE_SESSION_ID FM_* CCDT_* CCDT_TEST_UNSENT',
+        `${server.username}@127.0.0.1`,
+        'printf "%s|%s|%s" "$CCDT_REMOTE_SESSION_ID" "$FM_TASK_ID" "${CCDT_TEST_UNSENT-unset}"',
+      ],
+      {
+        timeout: 10000,
+        env: {
+          ...process.env,
+          CLAUDE_CODE_SESSION_ID: 'session-1',
+          CCDT_REMOTE_SESSION_ID: 'other',
+          FM_TASK_ID: 'task-1',
+        },
+      },
+    );
+    assert.equal(stdout, 'session-1|task-1|unset');
   },
 );

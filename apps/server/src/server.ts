@@ -683,13 +683,14 @@ export function createProxyServer(options: ServerOptions) {
         throw new Error('Connection closed');
       current.process = new NativeTerminal(
         options.claude.executable,
-        terminalArguments(options.claude, session, peer.tunnel.ssh, continued),
+        terminalArguments(options.claude, session, peer.tunnel.ssh, continued, command.launch),
         {
           cwd,
           cols: command.cols,
           rows: command.rows,
           env: {
             ...terminalEnvironment(claudeAs(current.profile)),
+            ...command.launch?.env,
             ...hookEnvironment(`${hookAddress}/${current.id}/${hookSecret}`),
           },
         },
