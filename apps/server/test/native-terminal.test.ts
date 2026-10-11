@@ -303,7 +303,7 @@ test('launch settings join the provider settings in a private file; without them
   const provider = join(directory, 'provider.json');
   writeFileSync(
     provider,
-    JSON.stringify({ env: { A: 'b' }, hooks: { Notification: ['n'] }, model: 'm' }),
+    JSON.stringify({ env: { A: 'b' }, hooks: { Notification: ['n'], Stop: ['p'] }, model: 'm' }),
   );
   const options = { executable: 'claude', settingsPath: provider };
   assert.equal(launchSettingsPath(options, directory), provider);
@@ -315,7 +315,7 @@ test('launch settings join the provider settings in a private file; without them
   assert.deepEqual(JSON.parse(readFileSync(path!, 'utf8')), {
     env: { A: 'b' },
     model: 'm',
-    hooks: { Notification: ['n'], Stop: ['s'] },
+    hooks: { Notification: ['n'], Stop: ['p', 's'] },
     includeCoAuthoredBy: false,
   });
   assert.equal(statSync(path!).mode & 0o777, 0o600);

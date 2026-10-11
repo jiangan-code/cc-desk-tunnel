@@ -32,7 +32,7 @@ export function terminalEnvironment(
 }
 
 // The CLI takes one --settings, so a launch's settings join the provider settings in a private file beside the
-// session; hooks of the two are combined per event name. Without launch settings the provider file is used as is.
+// session; an event's hooks from both run, provider first. Without launch settings the provider file is used as is.
 export function launchSettingsPath(
   options: ClaudeOptions,
   cwd: string,
@@ -43,8 +43,14 @@ export function launchSettingsPath(
     ? JSON.parse(readFileSync(options.settingsPath, 'utf8'))
     : {};
   const merged = { ...provider, ...launch.settings };
-  if (provider.hooks || launch.settings.hooks)
-    merged.hooks = { ...provider.hooks, ...launch.settings.hooks };
+  if (provider.hooks && launch.settings.hooks) {
+    merged.hooks = { ...provider.hooks };
+    for (const [event, groups] of Object.entries(launch.settings.hooks))
+      merged.hooks[event] =
+        Array.isArray(merged.hooks[event]) && Array.isArray(groups)
+          ? [...merged.hooks[event], ...groups]
+          : groups;
+  }
   const path = join(cwd, '.claude', 'launch-settings.json');
   writeFileSync(path, JSON.stringify(merged) + '\n', { mode: 0o600 });
   return path;
