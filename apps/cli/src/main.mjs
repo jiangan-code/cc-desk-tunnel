@@ -2,7 +2,13 @@ import { realpath, stat } from 'node:fs/promises';
 import { basename, resolve } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { parseArgs } from 'node:util';
-import { effortSchema, LAUNCH_ENV_NAME, permissionModeSchema } from '@cc-desk-tunnel/protocol';
+import {
+  effortSchema,
+  LAUNCH_ENV_NAME,
+  LAUNCH_SETTINGS_KEYS,
+  launchSettingsSchema,
+  permissionModeSchema,
+} from '@cc-desk-tunnel/protocol';
 import { controlTlsOptions, openProxyBridge } from '../../desktop/electron/proxy-bridge.mjs';
 import { clearConfig, configDirectory, desktopLogin, loadConfig, saveConfig } from './config.mjs';
 import { openConnection } from './connection.mjs';
@@ -41,6 +47,10 @@ const USAGE = `用法：
       --append-system-prompt <文本>  追加在服务端系统提示之后
       --env <名=值>              给这次的 Claude Code 及它经隧道在本机执行的命令设置变量，可重复；
                                  名字只能是 FM_* 或 CCDT_*
+      --settings <JSON>          这次 Claude Code 的附加设置，只接受 hooks、attribution、
+                                 includeCoAuthoredBy、feedbackDrafts
+      --single                   只跑这一个 agent，不显示列表：它退出时 ccdt 随之退出（退出码相同），
+                                 ccdt 被结束（关掉终端、SIGTERM）时也结束这个 agent；Ctrl+Q 不再返回列表
 
 login 选项：--url <wss://…> --fingerprint <SHA256> --token-stdin（从标准输入读凭据）
 
@@ -66,6 +76,8 @@ export async function main(argv) {
         prompt: { type: 'string' },
         'append-system-prompt': { type: 'string' },
         env: { type: 'string', multiple: true },
+        settings: { type: 'string' },
+        single: { type: 'boolean' },
         model: { type: 'string', short: 'm' },
         effort: { type: 'string' },
         'permission-mode': { type: 'string' },
@@ -237,6 +249,7 @@ async function run(directory, values) {
   if (values.effort !== undefined && !effortSchema.safeParse(values.effort).success)
     throw new UsageError(`未知推理强度：${values.effort}`);
   const launch = launchOptions(values);
+  if (values.single && values.deck) throw new UsageError('--single 不能和 deck 一起用。');
   const projectPath = await realpath(resolve(directory)).catch(() => {
     throw new Error(`目录不存在：${directory}`);
   });
@@ -254,7 +267,14 @@ async function run(directory, values) {
   // ends the agents (without the daemon) and lets the steps below clean up the terminal.
   const abort = new AbortController();
   let connection, bridge;
-  const stop = () => (connection ? connection.close() : abort.abort());
+  // With --single the agent belongs to this ccdt, so a signal ends the agent first; the service reports it closed,
+  // which settles the attach below. A service that never answers still lets ccdt go after 5 s.
+  let single = null;
+  const stop = () => {
+    if (!single) return connection ? connection.close() : abort.abort();
+    single.close();
+    setTimeout(() => connection.close(), 5000).unref();
+  };
   const signals = ['SIGINT', 'SIGTERM', 'SIGHUP'];
   for (const signal of signals) process.on(signal, stop);
   let deck;
@@ -303,6 +323,21 @@ async function run(directory, values) {
       next = { sessionId: session.id, continued: !values.new, launch };
     }
     clearStatus();
+    if (values.single) {
+      attached = true;
+      single = attachTerminal(connection, next.sessionId, {
+        continued: next.continued,
+        launch,
+        detachable: false,
+      });
+      try {
+        const result = await single.exited;
+        return result.code ?? 0;
+      } finally {
+        attached = false;
+        process.stdout.write(TERMINAL_RESET);
+      }
+    }
     let message = '';
     for (;;) {
       if (!next) {
@@ -353,6 +388,20 @@ export function launchOptions(values) {
   if (values['append-system-prompt'] !== undefined) {
     if (!values['append-system-prompt']) throw new UsageError('--append-system-prompt 不能为空。');
     launch.appendSystemPrompt = values['append-system-prompt'];
+  }
+  if (values.settings !== undefined) {
+    let settings;
+    try {
+      settings = JSON.parse(values.settings);
+    } catch {
+      throw new UsageError('--settings 需要一个 JSON 对象。');
+    }
+    const parsed = launchSettingsSchema.safeParse(settings);
+    if (!parsed.success)
+      throw new UsageError(
+        `--settings 只接受 ${LAUNCH_SETTINGS_KEYS.join('、')} 组成的 JSON 对象。`,
+      );
+    launch.settings = parsed.data;
   }
   for (const assignment of values.env ?? []) {
     const at = assignment.indexOf('=');

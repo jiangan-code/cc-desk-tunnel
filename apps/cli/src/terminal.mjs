@@ -33,11 +33,17 @@ export const DETACH_KEY = /\x11|\x1b\[113;5(?::\d+)?u|\x1b\[27;5;113~/;
 // open or the connection dropped. `continued` picks up the session's latest conversation.
 //
 // `exited` settles with `{ code }` when the CLI ended, or `{ detached: true }` after Ctrl+Q or `detach()`, when the
-// CLI runs on in the service.
+// CLI runs on in the service. Without `detachable`, Ctrl+Q goes to the CLI like any other key.
 export function attachTerminal(
   connection,
   sessionId,
-  { input = process.stdin, output = process.stdout, continued = false, launch } = {},
+  {
+    input = process.stdin,
+    output = process.stdout,
+    continued = false,
+    launch,
+    detachable = true,
+  } = {},
 ) {
   let id = null;
   let pendingBytes = 0;
@@ -63,7 +69,7 @@ export function attachTerminal(
   const onInput = (chunk) => {
     if (!id) return;
     let text = typeof chunk === 'string' ? chunk : decoder.write(chunk);
-    const key = DETACH_KEY.exec(text);
+    const key = detachable ? DETACH_KEY.exec(text) : null;
     if (key) text = text.slice(0, key.index);
     for (const data of inputFrames(text))
       connection.control({ type: 'terminal.input', sessionId, terminalId: id, data });

@@ -665,7 +665,7 @@ export function createProxyServer(options: ServerOptions) {
     };
     terminals.set(current.id, current);
     try {
-      const { NativeTerminal, terminalArguments, terminalEnvironment } =
+      const { NativeTerminal, launchSettingsPath, terminalArguments, terminalEnvironment } =
         await import('./native-terminal.ts');
       if (closing || peer.socket.readyState !== WebSocket.OPEN)
         throw new Error('Connection closed');
@@ -683,7 +683,16 @@ export function createProxyServer(options: ServerOptions) {
         throw new Error('Connection closed');
       current.process = new NativeTerminal(
         options.claude.executable,
-        terminalArguments(options.claude, session, peer.tunnel.ssh, continued, command.launch),
+        terminalArguments(
+          {
+            ...options.claude,
+            settingsPath: launchSettingsPath(options.claude, cwd, command.launch),
+          },
+          session,
+          peer.tunnel.ssh,
+          continued,
+          command.launch,
+        ),
         {
           cwd,
           cols: command.cols,
@@ -691,6 +700,8 @@ export function createProxyServer(options: ServerOptions) {
           env: {
             ...terminalEnvironment(claudeAs(current.profile)),
             ...command.launch?.env,
+            // Lets a hook the launch added reach the desktop the same way the CLI's own commands do.
+            CCDT_SSH_CONFIG: peer.tunnel.ssh.configPath,
             ...hookEnvironment(`${hookAddress}/${current.id}/${hookSecret}`),
           },
         },

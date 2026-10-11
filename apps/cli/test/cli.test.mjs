@@ -251,6 +251,15 @@ test('launch options become the terminal launch; only FM_* and CCDT_* variables 
   for (const env of ['PATH=/x', 'FM_TASK_ID', '=v'])
     assert.throws(() => launchOptions({ env: [env] }), /FM_\* 或 CCDT_\*/, env);
   assert.throws(() => launchOptions({ prompt: '' }), /--prompt/);
+  const hooks = { Stop: [{ hooks: [{ type: 'command', command: 'true' }] }] };
+  assert.deepEqual(
+    launchOptions({ settings: JSON.stringify({ hooks, includeCoAuthoredBy: false }) }),
+    {
+      settings: { hooks, includeCoAuthoredBy: false },
+    },
+  );
+  for (const settings of ['[]', 'not json', '{"env":{"A":"b"}}', '{"apiKeyHelper":"x"}'])
+    assert.throws(() => launchOptions({ settings }), /--settings/, settings);
 });
 
 test('Ctrl+Q leaves the agent running: input before it is sent, the terminal is detached', async () => {
@@ -275,6 +284,27 @@ test('Ctrl+Q leaves the agent running: input before it is sent, the terminal is 
   connection.emit({ type: 'terminal.opened', sessionId: SESSION, terminalId: TERMINAL });
   kitty.input.emit('data', Buffer.from('\x1b[113;5u'));
   assert.deepEqual(await again.exited, { detached: true });
+});
+
+test('a terminal that is not detachable sends Ctrl+Q to the CLI and carries its launch', async () => {
+  const connection = fakeConnection();
+  const tty = fakeTty();
+  const launch = { prompt: 'go' };
+  const terminal = attachTerminal(connection, SESSION, { ...tty, launch, detachable: false });
+  assert.deepEqual(connection.requests.at(-1).launch, launch);
+  connection.emit({ type: 'terminal.opened', sessionId: SESSION, terminalId: TERMINAL });
+  tty.input.emit('data', Buffer.from('ls\x11rest'));
+  assert.deepEqual(
+    connection.sent.map((message) => message.data),
+    ['ls\x11rest'],
+  );
+  connection.emit({
+    type: 'terminal.closed',
+    sessionId: SESSION,
+    terminalId: TERMINAL,
+    exitCode: 3,
+  });
+  assert.deepEqual(await terminal.exited, { code: 3 });
 });
 
 test('the agent list fits wide text, groups by directory and puts running agents first', () => {

@@ -11,6 +11,22 @@ export type Effort = z.infer<typeof effortSchema>;
 // Variables a launch may set for the CLI. Only these prefixes are accepted, so a launch cannot redirect the CLI's own
 // configuration (its provider, account or settings); the SSH tunnel forwards the same names to the desktop.
 export const LAUNCH_ENV_NAME = /^(FM|CCDT)_[A-Z0-9_]{1,64}$/;
+// Settings a launch may add for the CLI: hooks and commit attribution, never anything that changes its provider,
+// account or credentials.
+export const LAUNCH_SETTINGS_KEYS = [
+  'hooks',
+  'attribution',
+  'includeCoAuthoredBy',
+  'feedbackDrafts',
+] as const;
+export const launchSettingsSchema = z
+  .object({
+    hooks: z.record(z.string(), z.unknown()).optional(),
+    attribution: z.record(z.string(), z.unknown()).optional(),
+    includeCoAuthoredBy: z.boolean().optional(),
+    feedbackDrafts: z.string().optional(),
+  })
+  .strict();
 export const terminalLaunchSchema = z
   .object({
     // The first user message, sent as soon as the CLI starts.
@@ -18,6 +34,7 @@ export const terminalLaunchSchema = z
     // Appended after the service's own system prompt.
     appendSystemPrompt: z.string().min(1).max(100_000).optional(),
     env: z.record(z.string().regex(LAUNCH_ENV_NAME), z.string().max(4096)).optional(),
+    settings: launchSettingsSchema.optional(),
   })
   .strict();
 export type TerminalLaunch = z.infer<typeof terminalLaunchSchema>;

@@ -1,12 +1,17 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
-import { NativeTerminal, terminalArguments, terminalEnvironment } from '../src/native-terminal.ts';
+import {
+  launchSettingsPath,
+  NativeTerminal,
+  terminalArguments,
+  terminalEnvironment,
+} from '../src/native-terminal.ts';
 import { completeOnboarding } from '../src/native-onboarding.ts';
 import { NativeLogin, parseAccountStatus } from '../src/native-account.ts';
 import type { TerminalSpawner } from '../src/native-terminal.ts';
 import type { Session } from '@cc-desk-tunnel/protocol';
-import { mkdtempSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync, rmSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -290,4 +295,28 @@ test('a terminal launch appends to the system prompt and ends with its first mes
   assert.equal(args.filter((arg) => arg === '--append-system-prompt').length, 1);
   assert.deepEqual(args.slice(-2), ['--', '-starts with a dash']);
   assert.ok(!terminalArguments({ executable: 'claude' }, session, ssh).includes('--'));
+});
+
+test('launch settings join the provider settings in a private file; without them the provider file is used', (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'cc-desk-tunnel-launch-settings-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const provider = join(directory, 'provider.json');
+  writeFileSync(
+    provider,
+    JSON.stringify({ env: { A: 'b' }, hooks: { Notification: ['n'] }, model: 'm' }),
+  );
+  const options = { executable: 'claude', settingsPath: provider };
+  assert.equal(launchSettingsPath(options, directory), provider);
+  mkdirSync(join(directory, '.claude'));
+  const path = launchSettingsPath(options, directory, {
+    settings: { hooks: { Stop: ['s'] }, includeCoAuthoredBy: false },
+  });
+  assert.equal(path, join(directory, '.claude', 'launch-settings.json'));
+  assert.deepEqual(JSON.parse(readFileSync(path!, 'utf8')), {
+    env: { A: 'b' },
+    model: 'm',
+    hooks: { Notification: ['n'], Stop: ['s'] },
+    includeCoAuthoredBy: false,
+  });
+  assert.equal(statSync(path!).mode & 0o777, 0o600);
 });

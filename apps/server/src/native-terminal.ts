@@ -4,7 +4,8 @@ import type { Session, TerminalLaunch } from '@cc-desk-tunnel/protocol';
 import type { ClaudeOptions } from './claude.ts';
 import { remotePrompt } from './claude.ts';
 import type { SshConnection } from './tunnel.ts';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import headless from '@xterm/headless';
 import serialize from '@xterm/addon-serialize';
 
@@ -28,6 +29,25 @@ export function terminalEnvironment(
         if (typeof value === 'string') env[key] = value;
   }
   return { ...env, ...options.environment, TERM: 'xterm-256color' };
+}
+
+// The CLI takes one --settings, so a launch's settings join the provider settings in a private file beside the
+// session; hooks of the two are combined per event name. Without launch settings the provider file is used as is.
+export function launchSettingsPath(
+  options: ClaudeOptions,
+  cwd: string,
+  launch: TerminalLaunch = {},
+) {
+  if (!launch.settings) return options.settingsPath;
+  const provider = options.settingsPath
+    ? JSON.parse(readFileSync(options.settingsPath, 'utf8'))
+    : {};
+  const merged = { ...provider, ...launch.settings };
+  if (provider.hooks || launch.settings.hooks)
+    merged.hooks = { ...provider.hooks, ...launch.settings.hooks };
+  const path = join(cwd, '.claude', 'launch-settings.json');
+  writeFileSync(path, JSON.stringify(merged) + '\n', { mode: 0o600 });
+  return path;
 }
 
 type TerminalProcess = Pick<
