@@ -23,6 +23,7 @@ import { attachTerminal, TERMINAL_RESET } from './terminal.mjs';
 const USAGE = `用法：
   ccdt [目录]            在目录（默认当前目录）上打开远端原版 Claude Code
   ccdt deck [目录]       先打开 agent 列表
+  ccdt ls [目录]         列出 agent 和它们此刻的状态（需要后台服务）；--json 输出 JSON
   ccdt daemon install    装成 systemd 用户服务：关掉终端 agent 也继续运行
   ccdt daemon status | stop | uninstall
   ccdt login             保存服务地址、证书指纹和服务凭据
@@ -34,6 +35,9 @@ const USAGE = `用法：
   -m, --model <模型>             会话模型
       --effort <强度>            low / medium / high / xhigh / max
       --permission-mode <模式>   auto / default / plan / acceptEdits
+      --name <名字>              新建会话的名字（默认用目录名）
+      --single                   只跑这一个 agent，不显示列表：它退出时 ccdt 随之退出（退出码相同），
+                                 ccdt 被结束（关掉终端、SIGTERM）时也结束这个 agent；Ctrl+Q 不再返回列表
 
 login 选项：--url <wss://…> --fingerprint <SHA256> --token-stdin（从标准输入读凭据）
 
@@ -58,6 +62,9 @@ export async function main(argv) {
         model: { type: 'string', short: 'm' },
         effort: { type: 'string' },
         'permission-mode': { type: 'string' },
+        name: { type: 'string' },
+        single: { type: 'boolean' },
+        json: { type: 'boolean' },
         url: { type: 'string' },
         fingerprint: { type: 'string' },
         'token-stdin': { type: 'boolean' },
@@ -79,6 +86,10 @@ export async function main(argv) {
       return 0;
     }
     if (positionals[0] === 'daemon') return await daemon(positionals[1]);
+    if (positionals[0] === 'ls') {
+      if (positionals.length > 2) throw new UsageError('只能指定一个目录。');
+      return await list(positionals[1], values);
+    }
     const deck = positionals[0] === 'deck';
     if (deck) positionals.shift();
     if (positionals.length > 1) throw new UsageError('只能指定一个目录。');
@@ -225,6 +236,8 @@ async function run(directory, values) {
     throw new UsageError(`未知审批模式：${permissionMode}`);
   if (values.effort !== undefined && !effortSchema.safeParse(values.effort).success)
     throw new UsageError(`未知推理强度：${values.effort}`);
+  if (values.name !== undefined && !values.name.trim()) throw new UsageError('--name 不能为空。');
+  if (values.single && values.deck) throw new UsageError('--single 不能和 deck 一起用。');
   const projectPath = await realpath(resolve(directory)).catch(() => {
     throw new Error(`目录不存在：${directory}`);
   });
@@ -242,7 +255,14 @@ async function run(directory, values) {
   // ends the agents (without the daemon) and lets the steps below clean up the terminal.
   const abort = new AbortController();
   let connection, bridge;
-  const stop = () => (connection ? connection.close() : abort.abort());
+  // With --single the agent belongs to this ccdt, so a signal ends the agent first; the service reports it closed,
+  // which settles the attach below. A service that never answers still lets ccdt go after 5 s.
+  let single = null;
+  const stop = () => {
+    if (!single) return connection ? connection.close() : abort.abort();
+    single.close();
+    setTimeout(() => connection.close(), 5000).unref();
+  };
   const signals = ['SIGINT', 'SIGTERM', 'SIGHUP'];
   for (const signal of signals) process.on(signal, stop);
   let deck;
@@ -291,6 +311,19 @@ async function run(directory, values) {
       next = { sessionId: session.id, continued: !values.new };
     }
     clearStatus();
+    if (values.single) {
+      attached = true;
+      single = attachTerminal(connection, next.sessionId, {
+        continued: next.continued,
+        detachable: false,
+      });
+      try {
+        return (await single.exited).code ?? 0;
+      } finally {
+        attached = false;
+        process.stdout.write(TERMINAL_RESET);
+      }
+    }
     let message = '';
     for (;;) {
       if (!next) {
@@ -336,16 +369,12 @@ export async function chooseSession(connection, projectPath, values) {
         .filter((candidate) => candidate.projectPath === projectPath)
         .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
   if (!session) {
-    const { sessionId } = await connection.request({
-      type: 'session.create',
-      title: basename(projectPath).slice(0, 120) || projectPath.slice(-120),
-      projectPath,
-    });
-    session = {
-      id: sessionId,
-      title: basename(projectPath) || projectPath,
-      permissionMode: 'auto',
-    };
+    const title =
+      values.name?.trim().slice(0, 120) ||
+      basename(projectPath).slice(0, 120) ||
+      projectPath.slice(-120);
+    const { sessionId } = await connection.request({ type: 'session.create', title, projectPath });
+    session = { id: sessionId, title, permissionMode: 'auto' };
   }
   if (
     values.model !== undefined ||
@@ -360,4 +389,56 @@ export async function chooseSession(connection, projectPath, values) {
       ...(values.effort !== undefined && { effort: values.effort }),
     });
   return session;
+}
+
+// `ccdt ls`: the agents the list shows, with what each is doing now. Only through the daemon: a connection of its
+// own would take the device's place and, when it closed, end the agents.
+async function list(directory, values) {
+  const projectPath =
+    directory === undefined
+      ? undefined
+      : await realpath(resolve(directory)).catch(() => {
+          throw new Error(`目录不存在：${directory}`);
+        });
+  if (!(await daemonRunning()))
+    throw new Error('ccdt ls 需要后台服务；请先运行 ccdt daemon install。');
+  const connection = await openConnection(`ws+unix://${daemonSocket()}:/`, null);
+  try {
+    const agents = await listAgents(connection, projectPath);
+    if (values.json) console.log(JSON.stringify(agents));
+    else
+      for (const agent of agents)
+        console.log([agent.status, agent.title, agent.projectPath, agent.id].join('\t'));
+    return 0;
+  } finally {
+    connection.close();
+  }
+}
+
+// Sessions (of one directory, when given) with their terminal's status: starting, busy, waiting or idle, and
+// stopped when no terminal runs. Asks for `terminals.state`, the same report the list keeps itself current with.
+export async function listAgents(connection, projectPath, { timeoutMs = 10000 } = {}) {
+  let unsubscribe;
+  const state = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('服务没有返回 agent 状态。')), timeoutMs);
+    unsubscribe = connection.onMessage((message) => {
+      if (message.type !== 'terminals.state') return;
+      clearTimeout(timer);
+      resolve(message.terminals);
+    });
+  });
+  try {
+    await connection.request({ type: 'terminal.list' });
+    const terminals = new Map((await state).map((terminal) => [terminal.sessionId, terminal]));
+    return connection.ready.sessions
+      .filter((session) => projectPath === undefined || session.projectPath === projectPath)
+      .map((session) => ({
+        id: session.id,
+        title: session.title,
+        projectPath: session.projectPath,
+        status: terminals.get(session.id)?.status ?? 'stopped',
+      }));
+  } finally {
+    unsubscribe();
+  }
 }

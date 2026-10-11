@@ -37,6 +37,13 @@ ccdt deck          # 先打开 agent 列表
 
 服务端登录了多个 Claude 账号时，按 `a` 打开账号列表：`Enter` 切换当前账号，`n` 新建账号。之后新开的 agent 用当前账号，运行中的不受影响，用的不是当前账号的会在名字后标出 `@账号名`。对话各账号共用：要让一个 agent 换号，按 `d` 结束它，再按 `Enter` 进入，就会以新账号接着原来的对话。新账号第一次进入 agent 时按 Claude Code 的提示登录。详见[多个 Claude 账号](../../docs/multi-account.md)。
 
+## 由脚本管理 agent
+
+编排工具（例如在 tmux 窗格里派活的脚本）可以按 ccdt 自己的方式管理多个 agent：每个 agent 是后台服务连接上的一个会话，状态就是列表里那一列。
+
+- `ccdt <目录> -n --single --name <名字>`：新建一个会话并只显示它。agent 退出时 ccdt 以相同退出码退出；ccdt 被结束（关掉终端或窗格、`SIGTERM`、`SIGHUP`）时先结束这个 agent，即使后台服务在运行，5 秒内服务端没回应也照样退出。Ctrl+Q 直接交给 Claude Code，不回到列表。
+- `ccdt ls [目录] [--json]`：列出 agent（给了目录就只列这个目录的）和它们此刻的状态：`starting`、`busy`（运行中）、`waiting`（等你）、`idle`（空闲）、`stopped`（没有在运行）。需要后台服务：单独的连接会占用执行设备，关闭时还会结束 agent。
+
 ## 后台常驻
 
 ```bash
