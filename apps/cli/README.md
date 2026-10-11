@@ -52,7 +52,7 @@ ccdt ~/code/myproject -n --name task-1 \
 - `--append-system-prompt`：追加在服务端系统提示（告诉 Claude 经 SSH 在本机执行的那一段）之后。
 - `--env 名=值`：可重复，名字只能是 `FM_*` 或 `CCDT_*`。变量设给这次的 Claude Code，并随它经隧道在本机执行的每条命令一起到达本机。
 - `--name`：新建会话时的名字，默认用目录名。
-- `--settings <JSON>`：这次 Claude Code 的附加设置，与服务端的提供方设置合并成一个文件；只接受 `hooks`、`attribution`、`includeCoAuthoredBy`、`feedbackDrafts`。钩子在服务端运行，环境里的 `CCDT_SSH_CONFIG` 是这次连接的 SSH 配置，钩子用 `ssh -F "\$CCDT_SSH_CONFIG" windows '…'` 回到本机执行。
+- `--settings <JSON>`：这次 Claude Code 的附加设置，与服务端的提供方设置合并成一个文件；只接受 `hooks`、`attribution`、`includeCoAuthoredBy`、`feedbackDrafts`。钩子在服务端运行，环境里的 `CCDT_SSH_CONFIG` 是这次连接的 SSH 配置，钩子用 `ssh -F "$CCDT_SSH_CONFIG" windows '…'` 回到本机执行。
 - `--single`：只跑这一个 agent，不显示列表。agent 退出时 ccdt 以相同退出码退出；ccdt 被结束（关掉终端、`SIGTERM`、`SIGHUP`）时先结束这个 agent，即使后台服务在运行。Ctrl+Q 直接交给 Claude Code。适合放在 tmux 窗格里由编排工具管理。
 
 本机执行的每条命令还带着 `CCDT_REMOTE_SESSION_ID`（发出命令的 Claude Code 会话 ID），本机程序可以据此区分不同 agent。
