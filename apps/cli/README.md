@@ -62,6 +62,23 @@ ccdt daemon uninstall    # 停止并移除
 - 用户服务随桌面登录启动；退出桌面会话后也要保持运行，执行 `loginctl enable-linger`。
 - 日志：`journalctl --user -u ccdt`。与服务端的连接彻底断开（断网超过 3 分钟、服务端重启）时后台服务退出，systemd 10 秒后重新连接，原来的 agent 已结束。状态来自服务端注入原生目录 `.claude/settings.local.json` 的 Claude Code hooks，你在那里加的其他 hooks 会保留。
 
+## 经 SSH 隧道连接服务
+
+服务端口不对外开放、而是用 `ssh -L` 转发到本机时（服务地址填 `wss://127.0.0.1:18787/ws`），可以用 `ccdt-tunnel` 维持这条转发：
+
+```bash
+apps/cli/bin/ccdt-tunnel install <ssh 主机> [端口…]   # 默认端口 18787；装成 systemd 用户服务，脚本复制到 ~/.local/bin
+ccdt-tunnel status                                   # 现在可用的线路和隧道正在用的线路
+ccdt-tunnel uninstall
+```
+
+国内直连境外服务器的 SSH 常被限速：往返几百毫秒，而且成批到达，`ccdt` 里打字和滚动明显卡顿。走本机代理（v2rayN、Clash）则稳定得多。转发是一条长连接，建立时走哪条线路就一直走哪条：比代理先连上（开机时），或者代理中途开关、切换，它都会停在直连上。`ccdt-tunnel` 解决这个问题：
+
+- 连接时按顺序挑线路：到主机的路由经过的 TUN 网卡（v2rayN、Clash 的 TUN 模式）→ 正在监听的本机代理端口（v2rayN 的 SOCKS 端口、Clash Verge 的混合端口，从两者的配置读；其他代理软件写进 `~/.config/cc-desk-tunnel/tunnel.conf` 的 `proxies`）→ 直连。ssh 在 30 秒内退出就算这条线路不通，换下一条。
+- `ccdt-tunnel-watch.service` 每 15 秒检查一次，有比正在用的更好的线路就重启转发；`ccdt` 断线续接，停顿几秒。连不上而被跳过的线路，要等可用线路有变化才会再试。
+- ssh 使用 `BatchMode` 和 `StrictHostKeyChecking=yes`：先手动 `ssh <主机>` 一次，确认主机密钥并配好免密登录。
+- 日志：`journalctl --user -u ccdt-tunnel -u ccdt-tunnel-watch`。
+
 ## 安装与登录
 
 安装 deb 桌面包后直接有 `/usr/bin/ccdt`，由包内的 Electron 以 Node 模式运行。从源码使用需要 Node.js 24：

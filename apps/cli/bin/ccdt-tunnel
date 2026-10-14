@@ -1,0 +1,187 @@
+#!/bin/sh
+# ccdt-tunnel: keeps an SSH port forward to the service on the best route the local proxy offers.
+#
+# From mainland China a direct SSH connection to an overseas server is often throttled: round trips of several
+# hundred milliseconds, delivered in bursts, which makes typing and scrolling in ccdt lag. Through the local proxy
+# (v2rayN, Clash) it is steady. The forward is one long-lived connection and keeps whichever route it was opened on:
+# opened before the proxy (at login), or kept across the proxy being switched on, off or swapped, it stays direct.
+#
+#   ccdt-tunnel install <ssh host> [port…]  systemd user services forwarding 127.0.0.1:<port> to the same port on
+#                                           the host (default 18787)
+#   ccdt-tunnel uninstall                   stops and removes them
+#   ccdt-tunnel status                      the routes available now and the one in use
+#   ccdt-tunnel run                         ccdt-tunnel.service: tries the routes best first, the next when ssh fails
+#   ccdt-tunnel watch                       ccdt-tunnel-watch.service: `check` every 15 s
+#   ccdt-tunnel check                       restarts the forward when a better route than its own is available
+#
+# Routes, best first: a TUN interface the route to the host goes through (v2rayN or Clash in TUN mode), a local
+# proxy port (v2rayN's SOCKS port and Clash Verge's mixed port from their settings, plus `proxies` in the
+# configuration), direct.
+set -u
+CONFIG=${XDG_CONFIG_HOME:-$HOME/.config}/cc-desk-tunnel/tunnel.conf
+UNITS=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user
+STATE=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/ccdt-tunnel.state
+UNIT=ccdt-tunnel.service
+WATCH=ccdt-tunnel-watch.service
+# An ssh that ends sooner than this after starting could not use its route.
+SETTLE=30
+
+usage() {
+  echo "用法：ccdt-tunnel install <ssh 主机> [端口…] | uninstall | status | run | watch | check" >&2
+  exit 2
+}
+load() {
+  if [ ! -r "$CONFIG" ]; then
+    echo "还没有安装：ccdt-tunnel install <ssh 主机> [端口…]" >&2
+    exit 1
+  fi
+  host= ports=18787 proxies=
+  . "$CONFIG"
+  address=$(ssh -G "$host" 2>/dev/null | awk '$1 == "hostname" { print $2 }')
+  address=$(getent ahosts "$address" | awk 'NR == 1 { print $1 }')
+}
+
+# The TUN interface the route to the host goes through, if it does.
+tun_device() {
+  dev=$(ip route get "$address" 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -n 1)
+  [ -n "$dev" ] && ip -d -o link show dev "$dev" 2>/dev/null | grep -q ' tun type ' && echo "$dev"
+  return 0
+}
+# Local proxy ports that are listening.
+proxy_ports() {
+  v2rayn=$(grep -o '"LocalPort": *[0-9]*' "$HOME/.local/share/v2rayN/guiConfigs/guiNConfig.json" 2>/dev/null |
+    head -n 1 | grep -o '[0-9]*$')
+  clash=$(sed -n 's/^verge_mixed_port: *\([0-9]*\).*/\1/p' \
+    "$HOME/.local/share/io.github.clash-verge-rev.clash-verge-rev/verge.yaml" 2>/dev/null | head -n 1)
+  for port in $v2rayn $clash $proxies; do
+    ss -Hltn "( sport = :$port )" | grep -q . && echo "$port"
+  done
+  return 0
+}
+# The routes available now, best first, on one line.
+candidates() {
+  dev=$(tun_device)
+  {
+    [ -n "$dev" ] && echo "tun:$dev"
+    for port in $(proxy_ports); do echo "socks:$port"; done
+    [ -z "$dev" ] && echo direct
+  } | awk '!seen[$0]++' | tr '\n' ' '
+}
+forward() {
+  forwards=
+  for port in $ports; do forwards="$forwards -L 127.0.0.1:$port:127.0.0.1:$port"; done
+  # shellcheck disable=SC2086
+  ssh -NT -o BatchMode=yes -o StrictHostKeyChecking=yes -o ExitOnForwardFailure=yes -o ConnectTimeout=15 \
+    -o ServerAliveInterval=10 -o ServerAliveCountMax=3 "$@" $forwards "$host"
+}
+
+run() {
+  seen=$(candidates)
+  skipped=
+  for route in $seen; do
+    echo "使用线路 $route（可用：$seen）"
+    printf "route='%s'\nskipped='%s'\nseen='%s'\n" "$route" "$skipped" "$seen" >"$STATE"
+    start=$(date +%s)
+    case $route in
+      socks:*) forward -o "ProxyCommand=nc -X 5 -x 127.0.0.1:${route#socks:} %h %p" ;;
+      *) forward ;;
+    esac
+    code=$?
+    # It ran a while: systemd starts it again, which picks the route afresh.
+    [ $(($(date +%s) - start)) -ge $SETTLE ] && exit "$code"
+    echo "线路 $route 连不上（ssh 退出码 $code），换下一条"
+    skipped="$skipped $route"
+  done
+  rm -f "$STATE"
+  exit 1
+}
+# A route skipped because it failed is not tried again until the routes available change, so a broken one does not
+# restart the forward over and over.
+check() {
+  systemctl --user -q is-active "$UNIT" || return 0
+  [ -r "$STATE" ] || return 0
+  route= skipped= seen=
+  . "$STATE"
+  now=$(candidates)
+  [ "$now" = "$seen" ] || skipped=
+  for best in $now; do
+    case " $skipped " in *" $best "*) continue ;; esac
+    [ "$best" = "$route" ] && return 0
+    echo "可用线路变为：$now；隧道从 $route 换到 $best"
+    systemctl --user restart "$UNIT"
+    return 0
+  done
+}
+
+install() {
+  [ $# -ge 1 ] || usage
+  host=$1
+  shift
+  ports=${*:-18787}
+  proxies=
+  [ -r "$CONFIG" ] && proxies=$(sed -n "s/^proxies='\(.*\)'$/\1/p" "$CONFIG")
+  if ! ssh -G "$host" >/dev/null 2>&1; then
+    echo "ssh 无法解析主机 $host。" >&2
+    exit 1
+  fi
+  mkdir -p "$(dirname "$CONFIG")" "$UNITS" "$HOME/.local/bin"
+  {
+    echo "host='$host'"
+    echo "ports='$ports'"
+    echo '# 其他代理软件的本机 SOCKS 或混合端口，空格分隔'
+    echo "proxies='$proxies'"
+  } >"$CONFIG"
+  target=$HOME/.local/bin/ccdt-tunnel
+  [ "$(realpath "$0")" = "$(realpath "$target" 2>/dev/null)" ] || cp "$0" "$target"
+  chmod 755 "$target"
+  cat >"$UNITS/$UNIT" <<'EOF'
+[Unit]
+Description=ccdt: SSH forward to the CC Desk Tunnel service over the best route
+StartLimitIntervalSec=0
+
+[Service]
+ExecStart=%h/.local/bin/ccdt-tunnel run
+Restart=always
+RestartSec=5
+UMask=0077
+
+[Install]
+WantedBy=default.target
+EOF
+  cat >"$UNITS/$WATCH" <<'EOF'
+[Unit]
+Description=ccdt: move the SSH forward to a better route when one appears
+
+[Service]
+ExecStart=%h/.local/bin/ccdt-tunnel watch
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+EOF
+  systemctl --user daemon-reload
+  systemctl --user enable "$UNIT" "$WATCH"
+  systemctl --user restart "$UNIT" "$WATCH"
+  echo "已安装：127.0.0.1:{$(echo "$ports" | tr ' ' ',')} 经 $host 转发。线路：ccdt-tunnel status；日志：journalctl --user -u ccdt-tunnel"
+}
+uninstall() {
+  systemctl --user disable --now "$UNIT" "$WATCH" 2>/dev/null
+  rm -f "$UNITS/$UNIT" "$UNITS/$WATCH" "$STATE" "$CONFIG"
+  systemctl --user daemon-reload
+  echo "已移除服务和配置；~/.local/bin/ccdt-tunnel 留着，不需要可以删掉。"
+}
+
+case ${1:-} in
+  install) shift; install "$@" ;;
+  uninstall) uninstall ;;
+  run) load; run ;;
+  check) load; check ;;
+  watch) load; while :; do check; sleep 15; done ;;
+  status)
+    load
+    echo "可用线路：$(candidates)"
+    if [ -r "$STATE" ]; then cat "$STATE"; else echo "隧道没有在运行"; fi
+    ;;
+  *) usage ;;
+esac
