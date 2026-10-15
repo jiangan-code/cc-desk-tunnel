@@ -11,6 +11,7 @@ import { attachTerminal, inputFrames } from '../src/terminal.mjs';
 import { Deck, cellWidth, deckRows, fit } from '../src/deck.mjs';
 import { addWorktree, ownWorktree, removeWorktree, repositoryOf } from '../src/git.mjs';
 import { newlyWaiting } from '../src/notify.mjs';
+import { herdrPane, herdrReporter } from '../src/herdr.mjs';
 import { directoryCandidates, freshTitle } from '../src/paths.mjs';
 import { execFileSync } from 'node:child_process';
 import { realpath } from 'node:fs/promises';
@@ -604,4 +605,61 @@ test('rm deletes stopped sessions and refuses, deleting nothing, when one is run
   await assert.rejects(removeAgents(connection, ['b', 'a']), /还在运行（idle）/);
   await assert.rejects(removeAgents(connection, ['b', 'zz']), /没有这个会话：zz/);
   assert.ok(connection.requests.every((command) => command.type === 'terminal.list'));
+});
+
+test('only a Herdr pane of its own gets reports, not one nested in tmux or zellij', () => {
+  assert.equal(herdrPane({ HERDR_ENV: '1', HERDR_PANE_ID: 'wA:p1A' }), 'wA:p1A');
+  assert.equal(herdrPane({ HERDR_PANE_ID: 'wA:p1A' }), null);
+  assert.equal(herdrPane({ HERDR_ENV: '1' }), null);
+  assert.equal(herdrPane({ HERDR_ENV: '1', HERDR_PANE_ID: 'wA:p1A', TMUX: '/tmp/t,1,0' }), null);
+  assert.equal(herdrPane({ HERDR_ENV: '1', HERDR_PANE_ID: 'wA:p1A', ZELLIJ: '0' }), null);
+});
+
+test('Herdr hears the state of the agent on screen, in order, once per change, and lets go on leaving', async () => {
+  const calls = [];
+  const reporter = herdrReporter('wA:p1A', async (args) => {
+    calls.push(args);
+  });
+  const state = (args) => args[args.indexOf('--state') + 1];
+  const other = { sessionId: 'other', status: 'busy' };
+  reporter.update([{ sessionId: SESSION, status: 'busy' }]);
+  reporter.attach(SESSION, [other]);
+  reporter.update([other, { sessionId: SESSION, status: 'starting' }]);
+  reporter.update([{ sessionId: SESSION, status: 'idle' }]);
+  reporter.update([
+    { sessionId: SESSION, status: 'busy' },
+    { sessionId: 'other', status: 'idle' },
+  ]);
+  reporter.update([{ sessionId: SESSION, status: 'busy' }]);
+  reporter.update([{ sessionId: SESSION, status: 'waiting' }]);
+  reporter.detach();
+  reporter.update([{ sessionId: SESSION, status: 'idle' }]);
+  reporter.detach();
+  await reporter.settled();
+  assert.deepEqual(
+    calls.map((args) => (args[1] === 'report-agent' ? state(args) : args[1])),
+    ['unknown', 'idle', 'working', 'blocked', 'release-agent'],
+  );
+  for (const args of calls) {
+    assert.equal(args[2], 'wA:p1A');
+    assert.deepEqual(args.slice(3, 7), ['--source', 'ccdt', '--agent', 'claude']);
+  }
+  const seqs = calls.map((args) => Number(args[args.indexOf('--seq') + 1]));
+  assert.deepEqual(
+    [...seqs].sort((a, b) => a - b),
+    seqs,
+  );
+  assert.equal(new Set(seqs).size, seqs.length);
+});
+
+test('a Herdr that fails or hangs never stops the reports behind it', async () => {
+  const calls = [];
+  const reporter = herdrReporter('wA:p1A', async (args) => {
+    calls.push(args[1]);
+    if (calls.length === 1) throw new Error('herdr gone');
+  });
+  reporter.attach(SESSION, [{ sessionId: SESSION, status: 'busy' }]);
+  reporter.detach();
+  await reporter.settled();
+  assert.deepEqual(calls, ['report-agent', 'release-agent']);
 });

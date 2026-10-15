@@ -18,6 +18,7 @@ import {
 import { environmentProxy } from './environment.mjs';
 import manifest from '../package.json' with { type: 'json' };
 import { Deck } from './deck.mjs';
+import { herdrPane, herdrReporter } from './herdr.mjs';
 import { attachTerminal, TERMINAL_RESET } from './terminal.mjs';
 
 const USAGE = `用法：
@@ -270,7 +271,8 @@ async function run(directory, values) {
   };
   const signals = ['SIGINT', 'SIGTERM', 'SIGHUP'];
   for (const signal of signals) process.on(signal, stop);
-  let deck;
+  let deck, herdr, unsubscribeHerdr;
+  let terminalsNow = [];
   try {
     if (background) status('连接后台服务 …');
     else {
@@ -299,6 +301,16 @@ async function run(directory, values) {
       host: config?.url ? new URL(config.url).host : '',
       background,
     });
+    // Inside a Herdr pane, Herdr shows the state of the agent on screen.
+    const pane = herdrPane();
+    if (pane) {
+      herdr = herdrReporter(pane);
+      unsubscribeHerdr = connection.onMessage((message) => {
+        if (message.type !== 'terminals.state') return;
+        terminalsNow = message.terminals;
+        herdr.update(terminalsNow);
+      });
+    }
     await connection.request({ type: 'terminal.list' });
     let attached = false;
     // A network drop pauses everything until the bridge has the connection back. The list says so on its message
@@ -318,6 +330,7 @@ async function run(directory, values) {
     clearStatus();
     if (values.single) {
       attached = true;
+      herdr?.attach(next.sessionId, terminalsNow);
       single = attachTerminal(connection, next.sessionId, {
         continued: next.continued,
         detachable: false,
@@ -326,6 +339,7 @@ async function run(directory, values) {
         return (await single.exited).code ?? 0;
       } finally {
         attached = false;
+        herdr?.detach();
         process.stdout.write(TERMINAL_RESET);
       }
     }
@@ -339,6 +353,7 @@ async function run(directory, values) {
       const title = deck.sessions.get(next.sessionId)?.title ?? '';
       deck.attached = next.sessionId;
       attached = true;
+      herdr?.attach(next.sessionId, terminalsNow);
       const terminal = attachTerminal(connection, next.sessionId, { continued: next.continued });
       let result;
       try {
@@ -348,6 +363,7 @@ async function run(directory, values) {
         result = { error: error.message };
       } finally {
         attached = false;
+        herdr?.detach();
         deck.attached = null;
         process.stdout.write(TERMINAL_RESET + '\x1b[H\x1b[2J');
       }
@@ -360,6 +376,9 @@ async function run(directory, values) {
     }
   } finally {
     deck?.hide();
+    unsubscribeHerdr?.();
+    herdr?.detach();
+    await herdr?.settled();
     for (const signal of signals) process.off(signal, stop);
     connection?.close();
     await bridge?.close();
