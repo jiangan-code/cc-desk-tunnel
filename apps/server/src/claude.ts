@@ -78,7 +78,8 @@ export function nativeDirectory(dataDir: string, sessionId: string) {
 
 // A native terminal's CLI reports what it is doing through hooks in its directory's local settings. The command
 // posts to the address in CC_DESK_TUNNEL_HOOK, which only terminals get, so for runs it does nothing. A permission
-// prompt or question is `waiting`; the end of a turn is `idle`; a prompt or a finished tool is `busy` again.
+// prompt or question is `waiting`; the end of a turn is `idle`, also when an API error ended it (`StopFailure`, which
+// fires instead of `Stop`); a prompt or a finished tool is `busy` again.
 const HOOK_VARIABLE = 'CC_DESK_TUNNEL_HOOK';
 const hookCommand = (status: string) =>
   `[ -z "$${HOOK_VARIABLE}" ] || curl -fsS -m 2 -o /dev/null -X POST "$${HOOK_VARIABLE}/${status}" >/dev/null 2>&1; exit 0`;
@@ -88,6 +89,7 @@ const statusHooks: Record<string, { matcher?: string; status: string }> = {
   PostToolUse: { matcher: '*', status: 'busy' },
   Notification: { matcher: 'permission_prompt|elicitation_dialog', status: 'waiting' },
   Stop: { status: 'idle' },
+  StopFailure: { status: 'idle' },
 };
 type HookGroup = { matcher?: string; hooks?: { type?: string; command?: string }[] };
 // Replaces this service's hooks and keeps any the user added to the directory.
@@ -107,6 +109,9 @@ export function withStatusHooks(settings: { hooks?: Record<string, HookGroup[]> 
   return { ...settings, hooks };
 }
 export const hookEnvironment = (address: string) => ({ [HOOK_VARIABLE]: address });
+// Names the session a CLI process belongs to. The Linux desktop's SSH configuration sends it with every command (see
+// `sshConfig`), so a tool there can tell which session ran a command and look that session up in `ccdt ls`.
+export const sessionEnvironment = (sessionId: string) => ({ CCDT_SESSION_ID: sessionId });
 
 export function prepareNativeDirectory(options: ClaudeOptions, dataDir: string, sessionId: string) {
   const cwd = nativeDirectory(dataDir, sessionId);
@@ -172,7 +177,7 @@ export async function runClaude(
         settings: options.settingsPath,
         settingSources: ['user', 'project', 'local'],
         maxTurns: options.maxTurns,
-        env: { ...process.env, ...options.environment },
+        env: { ...process.env, ...options.environment, ...sessionEnvironment(run.sessionId) },
         stderr: (text) => {
           stderr = (stderr + text).slice(-8192);
         },

@@ -27,3 +27,34 @@ export function completeOnboarding(configDirectory = process.env.CLAUDE_CONFIG_D
     return false;
   }
 }
+
+// A terminal's CLI asks whether to trust its working directory the first time it starts there, and every session has
+// a directory of its own. The service makes that directory and writes its only settings, so it gives the answer up
+// front for the account the terminal runs as. Best effort: if the CLI state cannot be read, the CLI simply asks.
+export function trustDirectory(directory: string, configDirectory = process.env.CLAUDE_CONFIG_DIR) {
+  const statePath = join(configDirectory ?? homedir(), '.claude.json');
+  try {
+    const state = JSON.parse(readFileSync(statePath, 'utf8'));
+    const projects = state.projects ?? {};
+    if (projects[directory]?.hasTrustDialogAccepted === true) return false;
+    writeFileSync(
+      `${statePath}.trust`,
+      JSON.stringify(
+        {
+          ...state,
+          projects: {
+            ...projects,
+            [directory]: { ...projects[directory], hasTrustDialogAccepted: true },
+          },
+        },
+        null,
+        2,
+      ),
+      { mode: 0o600 },
+    );
+    renameSync(`${statePath}.trust`, statePath);
+    return true;
+  } catch {
+    return false;
+  }
+}

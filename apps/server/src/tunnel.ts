@@ -112,6 +112,8 @@ export function sshConfig(
       '  ServerAliveCountMax 2',
       '  ForwardAgent no',
       '  ClearAllForwardings yes',
+      // Tells the Linux desktop which session ran a command (`sessionEnvironment`); it accepts only this variable.
+      ...(linux ? ['  SendEnv CCDT_SESSION_ID'] : []),
       // The Linux desktop's SSH implementation has no post-quantum key exchange, which OpenSSH 10.1+ reports on every
       // command's stderr. The connection only ever runs inside the service's verified TLS, which carries that concern.
       '  IgnoreUnknown WarnWeakCrypto',
