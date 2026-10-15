@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -11,6 +11,7 @@ import type { ServerMessage, SessionEvent } from '@cc-desk-tunnel/protocol';
 import { createProxyServer } from '../src/server.ts';
 import { SessionStore } from '../src/store.ts';
 import { serviceVersion } from '../src/updates.ts';
+import { WindowsTunnel } from '../src/tunnel.ts';
 
 const token = 'offline-test-' + randomUUID();
 class Client {
@@ -22,13 +23,19 @@ class Client {
       this.messages.push(serverMessageSchema.parse(JSON.parse(raw.toString()))),
     );
   }
-  async open(authToken = token, protocolVersion = PROTOCOL_VERSION) {
+  async open(authToken = token, protocolVersion = PROTOCOL_VERSION, extra = {}) {
     await new Promise<void>((resolve, reject) => {
       this.socket.once('open', resolve);
       this.socket.once('error', reject);
     });
     this.socket.send(
-      JSON.stringify({ type: 'auth', token: authToken, protocolVersion, deviceName: '测试设备' }),
+      JSON.stringify({
+        type: 'auth',
+        token: authToken,
+        protocolVersion,
+        deviceName: '测试设备',
+        ...extra,
+      }),
     );
     return this.wait((message) => message.type === 'ready' || message.type === 'connection.error');
   }
@@ -622,6 +629,161 @@ test('offline mode cannot open a native terminal or accept unauthenticated termi
   client.send({ type: 'terminal.input', sessionId, terminalId: randomUUID(), data: '/config\r' });
   const error = await client.wait((message) => message.type === 'connection.error');
   assert.ok(error.type === 'connection.error' && error.code === 'terminal_inactive');
+});
+
+test('terminals choose accounts without switching the active account and protect the account they use', async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'ccdt-account-terminal-'));
+  const previous = process.env.CLAUDE_CONFIG_DIR;
+  process.env.CLAUDE_CONFIG_DIR = join(directory, 'default');
+  mkdirSync(process.env.CLAUDE_CONFIG_DIR);
+  const accountsDir = join(directory, 'accounts');
+  for (const name of ['work', 'signedout', 'broken'])
+    mkdirSync(join(accountsDir, name), { recursive: true });
+  const executable = join(directory, 'claude');
+  writeFileSync(
+    executable,
+    `#!/bin/sh
+if [ "$1" = auth ]; then
+  case "$2" in
+    status)
+      case "$CLAUDE_CONFIG_DIR" in
+        */broken) echo invalid; exit 1 ;;
+        */signedout) echo '{"loggedIn":false}'; exit 1 ;;
+      esac
+      echo '{"loggedIn":true,"email":"test@example.invalid","subscriptionType":"max"}'; exit 0 ;;
+    logout) exit 0 ;;
+    login) echo 'https://example.invalid/login '; read -r code; exit 0 ;;
+  esac
+fi
+printf 'account=%s\\n' "$CLAUDE_CONFIG_DIR"
+while read -r line; do :; done
+`,
+  );
+  chmodSync(executable, 0o755);
+  // Exercise the real terminal and account commands without an external SSH service.
+  t.mock.method(WindowsTunnel.prototype, 'start', async function (this: WindowsTunnel) {
+    this.ssh = {
+      configPath: join(directory, 'ssh_config'),
+      powershellPath: '/bin/bash',
+      platform: 'linux',
+    };
+    return { type: 'tunnel.relay' as const, connectionId: this.id, secret: 's'.repeat(43) };
+  });
+  const server = createProxyServer({
+    token,
+    dataDir: join(directory, 'data'),
+    accountsDir,
+    reverseProxy: true,
+    claude: { executable },
+    tunnel: {
+      executable: '',
+      publicHost: '',
+      port: 1,
+      certificatePath: '',
+      keyPath: '',
+      serverName: '',
+    },
+  });
+  const url = await server.listen(0);
+  const client = new Client(url);
+  t.after(async () => {
+    client.socket.terminate();
+    await server.close();
+    if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = previous;
+    rmSync(directory, { recursive: true, force: true });
+  });
+  await client.open(token, PROTOCOL_VERSION, { tunnel: true });
+  const create = async () => {
+    const response = await client.request({
+      type: 'session.create',
+      title: 'account test',
+      projectPath: directory,
+    });
+    assert.ok(response.type === 'response' && response.ok && response.sessionId);
+    return response.sessionId;
+  };
+  const first = await create();
+  const open = (sessionId: string, profile?: string) =>
+    client.request({
+      type: 'terminal.open',
+      sessionId,
+      cols: 80,
+      rows: 24,
+      ...(profile !== undefined && { profile }),
+    });
+  const failed = async (profile: string, code: string) => {
+    const response = await open(first, profile);
+    assert.ok(
+      response.type === 'response' && !response.ok && response.code === code,
+      JSON.stringify(response),
+    );
+    assert.equal(server.store.get(first).session.activeRun, null);
+  };
+  await failed('missing', 'profile_unknown');
+  await failed('signedout', 'profile_logged_out');
+  await failed('broken', 'profile_status_failed');
+  // The broken status fixture is no longer needed for account.state reads.
+  rmSync(join(accountsDir, 'broken'), { recursive: true });
+  const starting = open(first, 'work');
+  const duplicate = await open(first, 'work');
+  assert.ok(duplicate.type === 'response' && !duplicate.ok && duplicate.code === 'native_busy');
+  const opened = await starting;
+  assert.ok(opened.type === 'response' && opened.ok);
+  const terminal = await client.wait((message) => message.type === 'terminal.opened');
+  assert.ok(terminal.type === 'terminal.opened');
+  const data = await client.wait(
+    (message) => message.type === 'terminal.data' && message.data.includes('account='),
+  );
+  assert.ok(data.type === 'terminal.data' && data.data.includes(join(accountsDir, 'work')));
+  await client.request({ type: 'account.status' });
+  const state = await client.wait((message) => message.type === 'account.state');
+  assert.ok(state.type === 'account.state' && state.profile === 'default');
+  assert.deepEqual(
+    state.profiles?.find((entry) => entry.profile === 'work'),
+    { profile: 'work', loggedIn: true, email: 'test@example.invalid', subscriptionType: 'max' },
+  );
+  await client.request({ type: 'terminal.list' });
+  const terminals = await client.wait(
+    (message) =>
+      message.type === 'terminals.state' &&
+      message.terminals.some((entry) => entry.profile === 'work'),
+  );
+  assert.ok(terminals.type === 'terminals.state' && terminals.terminals[0].profile === 'work');
+  // A different active account can be managed while work is in use.
+  const logout = await client.request({ type: 'account.logout' });
+  assert.ok(logout.type === 'response' && logout.ok);
+  await client.request({ type: 'account.use', profile: 'work' });
+  for (const type of ['account.login', 'account.logout']) {
+    const busy = await client.request({ type });
+    assert.ok(busy.type === 'response' && !busy.ok && busy.code === 'native_busy');
+  }
+  await client.request({ type: 'account.use', profile: 'default' });
+  const conflict = await open(first, 'default');
+  assert.ok(conflict.type === 'response' && conflict.code === 'profile_conflict');
+  // Omission and matching selection both reattach the same process.
+  for (const profile of [undefined, 'work']) {
+    assert.ok((await open(first, profile)).type === 'response');
+    const again = await client.wait((message) => message.type === 'terminal.opened');
+    assert.ok(again.type === 'terminal.opened' && again.terminalId === terminal.terminalId);
+  }
+  const second = await create();
+  const implicit = await open(second);
+  assert.ok(implicit.type === 'response' && implicit.ok);
+  const defaults = await client.wait(
+    (message) => message.type === 'terminal.data' && message.sessionId === second,
+  );
+  assert.ok(
+    defaults.type === 'terminal.data' && defaults.data.includes(join(directory, 'default')),
+  );
+  await client.request({
+    type: 'terminal.close',
+    sessionId: first,
+    terminalId: terminal.terminalId,
+  });
+  await client.request({ type: 'account.use', profile: 'work' });
+  const available = await client.request({ type: 'account.logout' });
+  assert.ok(available.type === 'response' && available.ok);
 });
 
 test('restart marks pending native sends unconfirmed and never queues them again', (t) => {

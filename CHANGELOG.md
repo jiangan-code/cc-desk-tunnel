@@ -4,6 +4,7 @@
 
 ## 未发布
 
+- `ccdt` 按终端选择 Claude 账号：`--account <名字>` 支持新建、续接和 `--single`，不改变服务端当前账号，账号不存在或未登录时拒绝启动。`ccdt accounts [--json]` 查询账号，`ccdt ls --json` 的运行终端带实际 `profile`。协议增量扩展，版本不变；旧服务端会明确提示不支持。**服务端部分需要重新部署后生效。**见[多个 Claude 账号](docs/multi-account.md#为单个会话选择账号)。
 - `ccdt-tunnel`：经 `ssh -L` 连接服务时，让这条转发始终走本机代理（TUN、v2rayN 或 Clash Verge 的本机端口），代理开关或切换后 15 秒内自动换线路。此前转发若先于代理建立，会一直停在直连上，实测往返从约 165 ms 变成 300–860 ms，`ccdt` 里打字和滚动明显卡顿。见 [apps/cli](apps/cli/README.md#经-ssh-隧道连接服务)。
 - 多个 Claude 账号：服务端可以登录多个账号（官方 `CLAUDE_CONFIG_DIR`，每个账号一个配置目录），选定的当前账号用于之后新开的 agent 和运行；对话各账号共用，换号后可以接着同一段对话。`ccdt` 列表里按 `a` 切换或新建账号。协议增量扩展，未升版本，旧客户端照常可用。见[多个 Claude 账号](docs/multi-account.md)。
 - Linux 终端客户端 `ccdt`：在系统终端里直接使用远端原版 Claude Code，复用桌面客户端的连接桥与执行通道。见 [apps/cli](apps/cli/README.md)。deb 包自带 `/usr/bin/ccdt`，由包内 Electron 运行。

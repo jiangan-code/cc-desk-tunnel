@@ -6,7 +6,13 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { clearConfig, desktopLogin, loadConfig, saveConfig } from '../src/config.mjs';
 import { environmentProxy } from '../src/environment.mjs';
-import { chooseSession, listAgents, removeAgents } from '../src/main.mjs';
+import {
+  checkAccount,
+  chooseSession,
+  listAccounts,
+  listAgents,
+  removeAgents,
+} from '../src/main.mjs';
 import { attachTerminal, inputFrames } from '../src/terminal.mjs';
 import { Deck, cellWidth, deckRows, fit } from '../src/deck.mjs';
 import { addWorktree, ownWorktree, removeWorktree, repositoryOf } from '../src/git.mjs';
@@ -248,11 +254,14 @@ test('ls reports each session of a directory with its terminal status, stopped w
   const connection = fakeConnection(sessions);
   connection.request = async (command) => {
     connection.requests.push(command);
-    connection.emit({ type: 'terminals.state', terminals: [{ sessionId: 'a', status: 'busy' }] });
+    connection.emit({
+      type: 'terminals.state',
+      terminals: [{ sessionId: 'a', status: 'busy', profile: 'work' }],
+    });
     return { ok: true };
   };
   assert.deepEqual(await listAgents(connection, '/p'), [
-    { id: 'a', title: 'one', projectPath: '/p', status: 'busy' },
+    { id: 'a', title: 'one', projectPath: '/p', status: 'busy', profile: 'work' },
     { id: 'b', title: 'two', projectPath: '/p', status: 'stopped' },
   ]);
   assert.deepEqual(connection.requests, [{ type: 'terminal.list' }]);
@@ -284,6 +293,63 @@ test('a terminal that is not detachable sends Ctrl+Q to the CLI and settles with
     exitCode: 3,
   });
   assert.deepEqual(await terminal.exited, { code: 3 });
+});
+
+test('account reads expose only the shared contract and validate a launch before creating an agent', async () => {
+  const connection = fakeConnection();
+  const profiles = [
+    { profile: 'default', loggedIn: true, email: 'a@example.invalid', subscriptionType: 'pro' },
+    { profile: 'work', loggedIn: false },
+  ];
+  connection.request = async (command) => {
+    connection.requests.push(command);
+    connection.emit({
+      type: 'account.state',
+      profile: 'default',
+      profiles,
+      loggedIn: true,
+      login: null,
+      notice: 'private',
+    });
+    return { ok: true };
+  };
+  assert.deepEqual(await listAccounts(connection), { active: 'default', accounts: profiles });
+  await checkAccount(connection, 'default');
+  await assert.rejects(checkAccount(connection, 'work'), /账号 work 尚未登录/);
+  await assert.rejects(checkAccount(connection, 'missing'), /没有账号 missing/);
+  assert.ok(connection.requests.every((command) => command.type === 'account.status'));
+  connection.request = async () => {
+    connection.emit({ type: 'account.state', loggedIn: true, login: null });
+    return { ok: true };
+  };
+  await assert.rejects(
+    listAccounts(connection),
+    (error) => error.exitCode === 3 && /不支持多账号/.test(error.message),
+  );
+  await assert.rejects(listAccounts(fakeConnection(), { timeoutMs: 5 }), /没有返回账号状态/);
+});
+
+test('terminal selection forwards the account for fresh and continued sessions in either attach mode', async () => {
+  for (const continued of [false, true])
+    for (const detachable of [false, true]) {
+      const connection = fakeConnection();
+      const terminal = attachTerminal(connection, SESSION, {
+        ...fakeTty(),
+        profile: 'work',
+        continued,
+        detachable,
+      });
+      assert.deepEqual(connection.requests[0], {
+        type: 'terminal.open',
+        sessionId: SESSION,
+        cols: 400,
+        rows: 40,
+        profile: 'work',
+        ...(continued && { continue: true }),
+      });
+      connection.drop('done');
+      await assert.rejects(terminal.exited, /done/);
+    }
 });
 
 test('Ctrl+Q leaves the agent running: input before it is sent, the terminal is detached', async () => {

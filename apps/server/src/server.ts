@@ -636,9 +636,18 @@ export function createProxyServer(options: ServerOptions) {
   // one; opening the session again shows the running one.
   async function openTerminal(peer: Peer, command: CommandOf<'terminal.open'>, session: Session) {
     if (!options.claude) throw new DomainError('native_unavailable', '离线模拟不启动原生终端。');
+    const profile = command.profile ?? profiles.active;
+    if (!profiles.has(profile)) throw new DomainError('profile_unknown', `没有账号 ${profile}。`);
     const existing = terminalOf(command.sessionId);
     if (existing) {
       if (existing.owner !== peer) throw new DomainError('not_owner', '原生终端属于另一连接。');
+      if (command.profile !== undefined && existing.profile !== command.profile)
+        throw new DomainError(
+          'profile_conflict',
+          `这个终端正在使用账号 ${existing.profile}，请先结束它再选择账号 ${command.profile}。`,
+        );
+      if (!existing.process)
+        throw new DomainError('native_busy', '原生终端正在启动，请稍后重新进入。');
       send(peer, {
         type: 'terminal.opened',
         sessionId: command.sessionId,
@@ -656,16 +665,39 @@ export function createProxyServer(options: ServerOptions) {
         `最多同时运行 ${MAX_TERMINALS} 个原生终端，请先结束一个。`,
       );
     if (!peer.tunnel?.ssh) throw new DomainError('execution_offline', '本机 SSH 尚未就绪。');
+    if (login?.profile === profile)
+      throw new DomainError('login_active', `账号 ${profile} 正在登录，请先完成或取消登录。`);
     const current: Terminal = {
       id: randomUUID(),
       sessionId: command.sessionId,
       owner: peer,
       status: 'starting',
       since: new Date().toISOString(),
-      profile: profiles.active,
+      profile,
     };
     terminals.set(current.id, current);
     try {
+      // Reserve the terminal before reading sign-in state so login/logout cannot race the launch.
+      if (command.profile !== undefined) {
+        const { accountStatus } = await import('./native-account.ts');
+        let loggedIn: boolean;
+        try {
+          ({ loggedIn } = await accountStatus(
+            options.claude.executable,
+            profiles.environment(profile),
+          ));
+        } catch {
+          throw new DomainError(
+            'profile_status_failed',
+            `无法读取账号 ${profile} 的登录状态，请检查服务端 CLI。`,
+          );
+        }
+        if (!loggedIn)
+          throw new DomainError(
+            'profile_logged_out',
+            `账号 ${profile} 尚未登录，请先登录这个账号。`,
+          );
+      }
       const { NativeTerminal, terminalArguments, terminalEnvironment } =
         await import('./native-terminal.ts');
       if (closing || peer.socket.readyState !== WebSocket.OPEN)
@@ -732,9 +764,11 @@ export function createProxyServer(options: ServerOptions) {
       updated(command.sessionId);
       send(peer, { type: 'terminal.opened', sessionId: command.sessionId, terminalId: current.id });
       publishTerminals(peer);
-    } catch {
+    } catch (error) {
       await current.process?.close();
       if (terminals.get(current.id) === current) terminals.delete(current.id);
+      publishTerminals(peer);
+      if (error instanceof DomainError) throw error;
       throw new DomainError('terminal_failed', '原生终端启动失败，请检查 Linux PTY 组件与 CLI。');
     }
   }

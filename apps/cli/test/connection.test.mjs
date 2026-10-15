@@ -87,3 +87,47 @@ test('a refused connection reports the service reason', async () => {
     fake.close();
   }
 });
+
+test('old services rejecting account selection fail promptly without retrying as the active account', async () => {
+  for (const response of [false, true]) {
+    const opens = [];
+    const fake = await service((socket, message) => {
+      if (message.type === 'auth') socket.send(JSON.stringify(ready));
+      else if (message.type === 'terminal.open') {
+        opens.push(message);
+        socket.send(
+          JSON.stringify(
+            response
+              ? {
+                  type: 'response',
+                  requestId: message.requestId,
+                  ok: false,
+                  code: 'invalid_command',
+                  message: '请求格式无效。',
+                }
+              : { type: 'connection.error', code: 'invalid_command', message: '请求格式无效。' },
+          ),
+        );
+      }
+    });
+    const connection = await openConnection(fake.url, 't'.repeat(30));
+    try {
+      await assert.rejects(
+        connection.request({
+          type: 'terminal.open',
+          sessionId: SESSION,
+          cols: 80,
+          rows: 24,
+          profile: 'work',
+        }),
+        /服务端不支持选择账号/,
+      );
+      assert.equal(opens.length, 1);
+      assert.equal(opens[0].profile, 'work');
+    } finally {
+      connection.close();
+      await connection.closed;
+      fake.close();
+    }
+  }
+});
