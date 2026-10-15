@@ -37,6 +37,10 @@ ccdt deck          # 先打开 agent 列表
 
 服务端登录了多个 Claude 账号时，按 `a` 打开账号列表：`Enter` 切换当前账号，`n` 新建账号。之后新开的 agent 用当前账号，运行中的不受影响，用的不是当前账号的会在名字后标出 `@账号名`。对话各账号共用：要让一个 agent 换号，按 `d` 结束它，再按 `Enter` 进入，就会以新账号接着原来的对话。新账号第一次进入 agent 时按 Claude Code 的提示登录。详见[多个 Claude 账号](../../docs/multi-account.md)。
 
+## 在 Herdr 里使用
+
+在 [Herdr](https://herdr.dev) 的窗格里运行 ccdt 时，ccdt 会把屏幕上那个 agent 的状态告诉 Herdr：运行中、等你、空闲分别显示为 Herdr 的 working、blocked、idle，Herdr 的状态显示和提醒与窗格里直接运行 Claude Code 时一样。按 Ctrl+Q 回到列表或退出时交还给 Herdr 自己识别。Herdr 里再套一层 tmux 或 zellij 时不报告（那时 ccdt 显示在 tmux 或 zellij 的窗格里）。需要 `herdr` 在 PATH 上；报告失败不影响 ccdt。
+
 ## 由脚本管理 agent
 
 编排工具（例如在 tmux 窗格里派活的脚本）可以按 ccdt 自己的方式管理多个 agent：每个 agent 是后台服务连接上的一个会话，状态就是列表里那一列。
