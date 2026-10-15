@@ -2,7 +2,11 @@ import { realpath, stat } from 'node:fs/promises';
 import { basename, resolve } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { parseArgs } from 'node:util';
-import { effortSchema, permissionModeSchema } from '@cc-desk-tunnel/protocol';
+import {
+  ACCOUNT_PROFILE_PATTERN,
+  effortSchema,
+  permissionModeSchema,
+} from '@cc-desk-tunnel/protocol';
 import { controlTlsOptions, openProxyBridge } from '../../desktop/electron/proxy-bridge.mjs';
 import { clearConfig, configDirectory, desktopLogin, loadConfig, saveConfig } from './config.mjs';
 import { openConnection } from './connection.mjs';
@@ -25,6 +29,7 @@ const USAGE = `用法：
   ccdt [目录]            在目录（默认当前目录）上打开远端原版 Claude Code
   ccdt deck [目录]       先打开 agent 列表
   ccdt ls [目录]         列出 agent 和它们此刻的状态（需要后台服务）；--json 输出 JSON
+  ccdt accounts          列出服务端账号和登录状态；--json 输出 JSON，旧服务端退出码为 3
   ccdt rm <会话 ID>…     删除已停止的 agent 和它的对话（需要后台服务）
   ccdt daemon install    装成 systemd 用户服务：关掉终端 agent 也继续运行
   ccdt daemon status | stop | uninstall
@@ -38,6 +43,8 @@ const USAGE = `用法：
       --effort <强度>            low / medium / high / xhigh / max
       --permission-mode <模式>   auto / default / plan / acceptEdits
       --name <名字>              新建会话的名字（默认用目录名）
+      --account <账号>           为本次打开的终端选择已登录账号，不改变服务端当前账号；省略则用当前账号
+                                 续接已停止的会话时用此账号；运行中的终端保留原账号，不同则报错
       --single                   只跑这一个 agent，不显示列表：它退出时 ccdt 随之退出（退出码相同），
                                  ccdt 被结束（关掉终端、SIGTERM）时也结束这个 agent；Ctrl+Q 不再返回列表
 
@@ -65,6 +72,7 @@ export async function main(argv) {
         effort: { type: 'string' },
         'permission-mode': { type: 'string' },
         name: { type: 'string' },
+        account: { type: 'string' },
         single: { type: 'boolean' },
         json: { type: 'boolean' },
         url: { type: 'string' },
@@ -82,12 +90,20 @@ export async function main(argv) {
   if (values.help) return (console.log(USAGE), 0);
   if (values.version) return (console.log(manifest.version), 0);
   try {
+    if (values.account !== undefined && !ACCOUNT_PROFILE_PATTERN.test(values.account))
+      throw new UsageError(
+        '账号名只能用小写字母、数字、- 和 _，以字母或数字开头，最长 32 个字符。',
+      );
     if (positionals[0] === 'login') return await login(values);
     if (positionals[0] === 'logout') {
       console.log((await clearConfig()) ? '已删除保存的连接信息。' : '没有保存的连接信息。');
       return 0;
     }
     if (positionals[0] === 'daemon') return await daemon(positionals[1]);
+    if (positionals[0] === 'accounts') {
+      if (positionals.length > 1) throw new UsageError('accounts 不接受目录或其他参数。');
+      return await accounts(values);
+    }
     if (positionals[0] === 'ls') {
       if (positionals.length > 2) throw new UsageError('只能指定一个目录。');
       return await list(positionals[1], values);
@@ -105,7 +121,7 @@ export async function main(argv) {
     console.error(
       error instanceof UsageError ? `${error.message}\n\n${USAGE}` : `ccdt：${error.message}`,
     );
-    return error instanceof UsageError ? 2 : 1;
+    return error instanceof UsageError ? 2 : (error.exitCode ?? 1);
   }
 }
 class UsageError extends Error {}
@@ -294,6 +310,7 @@ async function run(directory, values) {
     ]);
     if (connection.ready.adapter !== 'claude-code')
       throw new Error('服务运行在离线模拟模式，没有原生终端。');
+    if (values.account !== undefined) await checkAccount(connection, values.account);
     let lost = null;
     connection.closed.then((reason) => (lost = reason ?? '连接已断开。'));
     deck = new Deck(connection, {
@@ -334,6 +351,7 @@ async function run(directory, values) {
       single = attachTerminal(connection, next.sessionId, {
         continued: next.continued,
         detachable: false,
+        profile: values.account,
       });
       try {
         return (await single.exited).code ?? 0;
@@ -354,12 +372,15 @@ async function run(directory, values) {
       deck.attached = next.sessionId;
       attached = true;
       herdr?.attach(next.sessionId, terminalsNow);
-      const terminal = attachTerminal(connection, next.sessionId, { continued: next.continued });
+      const terminal = attachTerminal(connection, next.sessionId, {
+        continued: next.continued,
+        profile: values.account,
+      });
       let result;
       try {
         result = await terminal.exited;
       } catch (error) {
-        if (lost) throw error;
+        if (lost || values.account !== undefined) throw error;
         result = { error: error.message };
       } finally {
         attached = false;
@@ -383,6 +404,72 @@ async function run(directory, values) {
     connection?.close();
     await bridge?.close();
   }
+}
+
+// Account reads do not start agents; use the daemon's connection when it owns the execution device.
+async function accounts(values) {
+  let connection, bridge;
+  try {
+    if (await daemonRunning())
+      connection = await openConnection(`ws+unix://${daemonSocket()}:/`, null);
+    else {
+      const config = await loadConfig();
+      if (!config?.token) throw new Error('没有可用的服务配置或凭据；请先运行 ccdt login。');
+      bridge = await openProxyBridge(
+        { url: config.url, fingerprint: config.fingerprint },
+        { resolveProxy: async (target) => environmentProxy(target) },
+      );
+      connection = await openConnection(bridge.url, config.token);
+    }
+    const state = await listAccounts(connection);
+    if (values.json) console.log(JSON.stringify(state));
+    else {
+      console.log(`当前账号：${state.active}`);
+      console.log('账号\t登录状态\t邮箱\t订阅');
+      for (const account of state.accounts)
+        console.log(
+          [
+            account.profile,
+            account.loggedIn ? '已登录' : '未登录',
+            account.email ?? '',
+            account.subscriptionType ?? '',
+          ].join('\t'),
+        );
+    }
+    return 0;
+  } finally {
+    connection?.close();
+    await bridge?.close();
+  }
+}
+
+export async function listAccounts(connection, { timeoutMs = 10000 } = {}) {
+  let unsubscribe, timer;
+  const state = new Promise((resolve, reject) => {
+    timer = setTimeout(() => reject(new Error('服务没有返回账号状态。')), timeoutMs);
+    unsubscribe = connection.onMessage((message) => {
+      if (message.type === 'account.state') resolve(message);
+    });
+  });
+  try {
+    const [, message] = await Promise.all([connection.request({ type: 'account.status' }), state]);
+    if (message.profile === undefined || message.profiles === undefined) {
+      const error = new Error('服务端不支持多账号，请升级并重新部署服务端。');
+      error.exitCode = 3;
+      throw error;
+    }
+    return { active: message.profile, accounts: message.profiles };
+  } finally {
+    clearTimeout(timer);
+    unsubscribe();
+  }
+}
+
+export async function checkAccount(connection, profile) {
+  const { accounts } = await listAccounts(connection);
+  const account = accounts.find((account) => account.profile === profile);
+  if (!account) throw new Error(`没有账号 ${profile}。`);
+  if (!account.loggedIn) throw new Error(`账号 ${profile} 尚未登录，请先登录这个账号。`);
 }
 
 // The most recently used session of the directory, or a new one.
@@ -493,6 +580,9 @@ export async function listAgents(connection, projectPath, { timeoutMs = 10000 } 
         title: session.title,
         projectPath: session.projectPath,
         status: terminals.get(session.id)?.status ?? 'stopped',
+        ...(terminals.get(session.id)?.profile !== undefined && {
+          profile: terminals.get(session.id).profile,
+        }),
       }));
   } finally {
     unsubscribe();

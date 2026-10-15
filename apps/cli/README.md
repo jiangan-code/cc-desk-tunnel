@@ -6,6 +6,7 @@
 cd ~/code/myproject
 ccdt               # 接着这个目录最近的对话；没有就新建
 ccdt -n            # 新建会话，从空白对话开始
+ccdt -n --account work # 只为这个终端选择服务端已登录的 work 账号
 ccdt ~/other -m opus --effort high --permission-mode plan
 ccdt deck          # 先打开 agent 列表
 ```
@@ -37,6 +38,10 @@ ccdt deck          # 先打开 agent 列表
 
 服务端登录了多个 Claude 账号时，按 `a` 打开账号列表：`Enter` 切换当前账号，`n` 新建账号。之后新开的 agent 用当前账号，运行中的不受影响，用的不是当前账号的会在名字后标出 `@账号名`。对话各账号共用：要让一个 agent 换号，按 `d` 结束它，再按 `Enter` 进入，就会以新账号接着原来的对话。新账号第一次进入 agent 时按 Claude Code 的提示登录。详见[多个 Claude 账号](../../docs/multi-account.md)。
 
+`ccdt [目录] --account <名字>` 为本次打开的终端选择账号，支持 `--new` 和 `--single`，不改变服务端当前账号；之后从本次 ccdt 列表打开的终端也用它。省略此选项仍用当前账号。账号未知或未登录时中文报错并非零退出，不会启动 agent。续接已停止的会话时用指定账号接着对话；已有运行终端时保留原账号，指定不同账号会报错，需要先结束旧终端。
+
+`ccdt accounts [--json]` 列出当前账号及每个账号的登录状态、邮箱和订阅类型；后台服务运行时复用它的连接，否则直接查询服务端。JSON 格式为 `{"active":"default","accounts":[{"profile":"default","loggedIn":true}]}`，邮箱 `email` 和订阅 `subscriptionType` 可选。不支持多账号的旧服务端向标准错误输出中文提示，退出码为 `3`；`--account` 遇到不支持选账号的旧服务端会明确报错。服务端部分需要重新部署后生效，协议版本不变。
+
 ## 在 Herdr 里使用
 
 在 [Herdr](https://herdr.dev) 的窗格里运行 ccdt 时，ccdt 会把屏幕上那个 agent 的状态告诉 Herdr：运行中、等你、空闲分别显示为 Herdr 的 working、blocked、idle，Herdr 的状态显示和提醒与窗格里直接运行 Claude Code 时一样。按 Ctrl+Q 回到列表或退出时交还给 Herdr 自己识别。Herdr 里再套一层 tmux 或 zellij 时不报告（那时 ccdt 显示在 tmux 或 zellij 的窗格里）。需要 `herdr` 在 PATH 上；报告失败不影响 ccdt。
@@ -46,7 +51,10 @@ ccdt deck          # 先打开 agent 列表
 编排工具（例如在 tmux 窗格里派活的脚本）可以按 ccdt 自己的方式管理多个 agent：每个 agent 是后台服务连接上的一个会话，状态就是列表里那一列。
 
 - `ccdt <目录> -n --single --name <名字>`：新建一个会话并只显示它。agent 退出时 ccdt 以相同退出码退出；ccdt 被结束（关掉终端或窗格、`SIGTERM`、`SIGHUP`）时先结束这个 agent，即使后台服务在运行，5 秒内服务端没回应也照样退出。Ctrl+Q 直接交给 Claude Code，不回到列表。
+- `ccdt <目录> --new --single --account <账号>`：为 worker 指定服务端已登录的账号，适合让 worker 与主控使用不同的订阅。
 - `ccdt ls [目录] [--json]`：列出 agent（给了目录就只列这个目录的）和它们此刻的状态：`starting`、`busy`（运行中）、`waiting`（等你）、`idle`（空闲）、`stopped`（没有在运行）。需要后台服务：单独的连接会占用执行设备，关闭时还会结束 agent。
+
+  `--json` 的运行终端记录另带 `profile`，表示其 CLI 实际使用的账号；没有运行终端时省略。旧服务端未提供账号字段时同样省略，其他字段不变。
 - `ccdt rm <会话 ID>…`：删除 agent 和它在服务端的对话，与列表里的删除相同。只删已经 `stopped` 的：有一个还在运行或不存在，就一个也不删。会话 ID 见 `ccdt ls` 的最后一列。需要后台服务。
 - 分辨命令来自哪个会话：Claude 在本机执行的每条命令都带着 `CCDT_REMOTE_SESSION_ID`，即发出它的会话 ID，与 `ccdt ls` 的最后一列相同；不是经 Claude 执行的命令没有这个变量。
 

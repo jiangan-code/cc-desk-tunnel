@@ -411,6 +411,8 @@ export const commandSchema = z.discriminatedUnion('type', [
       sessionId: id,
       cols: z.number().int().min(20).max(400),
       rows: z.number().int().min(5).max(160),
+      // Selects this terminal's account without changing the service's active account.
+      profile: accountProfile.optional(),
       // Picks up the session's latest native conversation, if it has one, instead of starting a new one.
       continue: z.boolean().optional(),
     })

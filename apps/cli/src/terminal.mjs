@@ -37,7 +37,13 @@ export const DETACH_KEY = /\x11|\x1b\[113;5(?::\d+)?u|\x1b\[27;5;113~/;
 export function attachTerminal(
   connection,
   sessionId,
-  { input = process.stdin, output = process.stdout, continued = false, detachable = true } = {},
+  {
+    input = process.stdin,
+    output = process.stdout,
+    continued = false,
+    detachable = true,
+    profile,
+  } = {},
 ) {
   let id = null;
   let pendingBytes = 0;
@@ -120,7 +126,13 @@ export function attachTerminal(
     }
   });
   connection
-    .request({ type: 'terminal.open', sessionId, ...initial, ...(continued && { continue: true }) })
+    .request({
+      type: 'terminal.open',
+      sessionId,
+      ...initial,
+      ...(continued && { continue: true }),
+      ...(profile !== undefined && { profile }),
+    })
     .catch((error) => finish(error));
   connection.closed.then((reason) => finish(new Error(reason ?? '连接已断开。')));
   return {

@@ -48,6 +48,22 @@ test('authentication version and event ordering are explicit', () => {
   assert.equal(eventSchema.safeParse({ ...event, sequence: 0 }).success, false);
 });
 
+test('terminal account selection is optional, bounded and incremental', () => {
+  const command = {
+    type: 'terminal.open',
+    requestId: randomUUID(),
+    sessionId: randomUUID(),
+    cols: 80,
+    rows: 24,
+  };
+  assert.equal(PROTOCOL_VERSION, 12);
+  assert.equal(commandSchema.safeParse(command).success, true);
+  for (const profile of ['default', 'work-2', 'a_b', 'a'.repeat(32)])
+    assert.equal(commandSchema.parse({ ...command, profile }).type, 'terminal.open');
+  for (const profile of ['', '../work', 'Work', '-work', 'a'.repeat(33)])
+    assert.equal(commandSchema.safeParse({ ...command, profile }).success, false);
+});
+
 test('terminal control frames are explicitly scoped and bounded without request caches', () => {
   const frame = {
     type: 'terminal.input',

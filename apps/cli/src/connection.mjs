@@ -25,7 +25,7 @@ export function openConnection(url, token, { timeoutMs = 60000 } = {}) {
         return Promise.reject(new Error(failure ?? '连接已断开。'));
       const requestId = randomUUID();
       return new Promise((resolve, reject) => {
-        pending.set(requestId, { resolve, reject });
+        pending.set(requestId, { resolve, reject, command });
         socket.send(JSON.stringify({ ...command, requestId }));
       });
     },
@@ -82,6 +82,15 @@ export function openConnection(url, token, { timeoutMs = 60000 } = {}) {
         ready = message;
         resolve(connection);
       } else if (message.type === 'connection.error') {
+        // Older services reject the incremental terminal.open field without a request ID.
+        if (message.code === 'invalid_command') {
+          for (const [id, request] of pending) {
+            if (request.command.type !== 'terminal.open' || request.command.profile === undefined)
+              continue;
+            pending.delete(id);
+            request.reject(new Error('服务端不支持选择账号，请升级并重新部署服务端。'));
+          }
+        }
         failure =
           message.code === 'version_mismatch'
             ? `服务端（${message.service ?? '未知版本'}）与本客户端协议不一致，请一起升级。`
@@ -91,7 +100,16 @@ export function openConnection(url, token, { timeoutMs = 60000 } = {}) {
         if (!request) return;
         pending.delete(message.requestId);
         if (message.ok) request.resolve(message);
-        else request.reject(new Error(message.message ?? message.code ?? '请求失败。'));
+        else
+          request.reject(
+            new Error(
+              message.code === 'invalid_command' &&
+                request.command.type === 'terminal.open' &&
+                request.command.profile !== undefined
+                ? '服务端不支持选择账号，请升级并重新部署服务端。'
+                : (message.message ?? message.code ?? '请求失败。'),
+            ),
+          );
         return;
       }
       for (const listener of messageListeners) listener(message);

@@ -42,6 +42,30 @@
 
 运行中的 agent 如果用的不是当前账号，列表里会在名字后面标出 `@账号名`。
 
+## 为单个会话选择账号
+
+启动时加 `--account <名字>`，只为这次打开的终端选择账号，不改变服务端当前账号。普通模式和 `--single` 都支持；省略时仍用当前账号：
+
+```bash
+ccdt ~/code/project --new --account work
+ccdt ~/code/project --new --single --account work --name worker
+ccdt accounts          # 当前账号、所有账号的登录状态、邮箱和订阅类型
+ccdt accounts --json   # 供编排脚本读取
+ccdt ls --json         # 运行中的终端带 profile 字段；已停止的会话没有此字段
+```
+
+账号必须已存在且已登录；未知或未登录的账号会以中文报错并非零退出，不会启动 agent。需要首次登录时，仍按上面的账号列表流程操作。
+
+续接已停止的会话时，新终端使用指定账号，并用 `--continue` 接着原来的对话。会话已有运行中的终端时保留它原来的账号：省略 `--account` 或指定相同账号会重新进入；指定不同账号会报错，需要先在列表里按 `d` 结束旧终端，再用指定账号打开。此选项也用于本次 ccdt 列表里之后打开的终端。
+
+`ccdt accounts --json` 输出格式如下，`email` 和 `subscriptionType` 在服务端没有提供时省略：
+
+```json
+{"active":"default","accounts":[{"profile":"default","loggedIn":true},{"profile":"work","loggedIn":true,"email":"work@example.com","subscriptionType":"max"}]}
+```
+
+后台服务运行时，`accounts` 复用它的连接；未运行时直接连接服务端查询，不会启动 agent。连接不支持多账号的旧服务端时，`accounts` 向标准错误输出中文提示并以退出码 `3` 退出；旧服务端不接受终端选账号时，`--account` 会提示升级，不会退回当前账号启动。**服务端部分需要重新部署后生效。**协议版本不变，旧客户端仍可正常使用。
+
 ## 不经 ccdt 使用
 
 在服务端容器里直接运行 CLI 时，用环境变量指定账号即可：
@@ -75,7 +99,7 @@ ln -s ~/.claude/skills ~/.claude-accounts/work/skills  # 可选：共用 skills
 | --- | --- |
 | 账号目录、当前账号、`CLAUDE_CONFIG_DIR` 环境 | `apps/server/src/native-profiles.ts` |
 | 运行、终端、状态读取、登录 / 退出、设置使用对应账号 | `apps/server/src/server.ts`、`native-account.ts` |
-| 协议：`account.use` / `account.add`，`account.state` 的 `profile` / `profiles`，终端的 `profile` | `packages/protocol/src/index.ts` |
-| ccdt 账号列表 | `apps/cli/src/deck.mjs` |
+| 协议：`account.use` / `account.add`，`account.state` 的 `profile` / `profiles`，`terminal.open` 可选的 `profile` 和终端状态的 `profile` | `packages/protocol/src/index.ts` |
+| ccdt 账号列表、`--account` 和 `accounts` | `apps/cli/src/deck.mjs`、`apps/cli/src/main.mjs` |
 
 协议只做了增量扩展，没有升协议版本：旧客户端照常连接，看到的是当前账号；新 ccdt 连旧服务端时，按 `a` 会提示服务端不支持多账号。服务端发给 CLI 进程的环境只多一个 `CLAUDE_CONFIG_DIR`；服务端自己用 Agent SDK 查找、续接、改名、删除对话时读的是默认目录的 `projects`，所以其他账号目录里必须是指向它的软链接。
