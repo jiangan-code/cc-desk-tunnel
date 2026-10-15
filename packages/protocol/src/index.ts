@@ -415,6 +415,8 @@ export const commandSchema = z.discriminatedUnion('type', [
       profile: accountProfile.optional(),
       // Picks up the session's latest native conversation, if it has one, instead of starting a new one.
       continue: z.boolean().optional(),
+      // Strict same-conversation recovery after transport resumption is no longer possible.
+      recover: z.boolean().optional(),
     })
     .strict(),
   z
@@ -559,6 +561,7 @@ export const serverMessageSchema = z.discriminatedUnion('type', [
     sessions: z.array(sessionSchema),
     // Granted to a resumable connection: how long the service keeps it after it dropped.
     resume: z.object({ key: resumeKey, graceMs: z.number().int().positive() }).optional(),
+    terminalRecovery: z.boolean().optional(),
   }),
   z.object({
     type: z.literal('response'),
@@ -621,7 +624,11 @@ export const serverMessageSchema = z.discriminatedUnion('type', [
   // The answer to `auth.resume`, before the frames the client missed; `received` is what the service got.
   z.object({ type: z.literal('resumed'), connectionId: id, received: frameCount }),
   // From the local bridge to its own client only: the service connection is being re-established, or is back.
-  z.object({ type: z.literal('connection.state'), state: z.enum(['reconnecting', 'connected']) }),
+  z.object({
+    type: z.literal('connection.state'),
+    state: z.enum(['reconnecting', 'connected']),
+    recovered: z.boolean().optional(),
+  }),
 ]);
 export type ServerMessage = z.infer<typeof serverMessageSchema>;
 
@@ -655,7 +662,7 @@ export class ResumeLog {
   private timer?: ReturnType<typeof setTimeout>;
   private acknowledge: (received: number) => void;
   private limit: number;
-  constructor(acknowledge: (received: number) => void, limit = 16 * 1024 * 1024) {
+  constructor(acknowledge: (received: number) => void, limit = 64 * 1024 * 1024) {
     this.acknowledge = acknowledge;
     this.limit = limit;
   }
@@ -663,13 +670,19 @@ export class ResumeLog {
   record(frame: string) {
     this.sent++;
     this.frames.push(frame);
-    this.size += frame.length;
-    return this.size <= this.limit;
+    this.size += new TextEncoder().encode(frame).byteLength;
+    const retained = this.size <= this.limit;
+    // Evict old frames rather than growing without bound. A gap forces session recovery, never partial replay.
+    while (this.size > this.limit && this.frames.length)
+      this.size -= new TextEncoder().encode(this.frames.shift()!).byteLength;
+    return retained;
   }
   // The other side has these; they need not be kept.
   confirm(received: number) {
     const drop = Math.min(received - (this.sent - this.frames.length), this.frames.length);
-    if (drop > 0) for (const frame of this.frames.splice(0, drop)) this.size -= frame.length;
+    if (drop > 0)
+      for (const frame of this.frames.splice(0, drop))
+        this.size -= new TextEncoder().encode(frame).byteLength;
   }
   // The frames after the first `received`, or null when they are not all held any more.
   since(received: number) {

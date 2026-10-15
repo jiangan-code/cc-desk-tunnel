@@ -74,3 +74,16 @@ test('native server fails before opening history storage when transport config i
     /TLS/,
   );
 });
+
+test('network resume grace defaults to thirty minutes and accepts bounded milliseconds', () => {
+  assert.equal(environmentConfig({}, '/tmp').options.resumeGraceMs, 1800000);
+  assert.equal(
+    environmentConfig({ PROXY_RESUME_GRACE_MS: '7200000' }, '/tmp').options.resumeGraceMs,
+    7200000,
+  );
+  for (const value of ['0', '-1', 'oops', '1.5', '2147483648'])
+    assert.throws(
+      () => environmentConfig({ PROXY_RESUME_GRACE_MS: value }, '/tmp'),
+      /PROXY_RESUME_GRACE_MS/,
+    );
+});

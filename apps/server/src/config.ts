@@ -31,6 +31,9 @@ export function environmentConfig(env: NodeJS.ProcessEnv, defaultDataDir: string
   const retention = Number(env.CLAUDE_CONTEXT_RETENTION_DAYS ?? 3650);
   if (!Number.isInteger(retention) || retention < 1)
     throw new Error('Invalid CLAUDE_CONTEXT_RETENTION_DAYS');
+  const resumeGraceMs = Number(env.PROXY_RESUME_GRACE_MS ?? 1800000);
+  if (!Number.isSafeInteger(resumeGraceMs) || resumeGraceMs < 1 || resumeGraceMs > 2147483647)
+    throw new Error('Invalid PROXY_RESUME_GRACE_MS');
   const cert = env.FRPS_TLS_CERT;
   const key = env.FRPS_TLS_KEY;
   if (native && (!cert || !key || !env.PROXY_PUBLIC_HOST || !env.FRPS_SERVER_NAME))
@@ -44,6 +47,7 @@ export function environmentConfig(env: NodeJS.ProcessEnv, defaultDataDir: string
     dataDir: resolve(env.PROXY_DATA_DIR ?? defaultDataDir),
     host: env.PROXY_HOST ?? (native && !reverseProxy ? '0.0.0.0' : '127.0.0.1'),
     reverseProxy,
+    resumeGraceMs,
     tls:
       native && !reverseProxy
         ? {

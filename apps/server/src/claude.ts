@@ -82,7 +82,7 @@ export function nativeDirectory(dataDir: string, sessionId: string) {
 // fires instead of `Stop`); a prompt or a finished tool is `busy` again.
 const HOOK_VARIABLE = 'CC_DESK_TUNNEL_HOOK';
 const hookCommand = (status: string) =>
-  `[ -z "$${HOOK_VARIABLE}" ] || curl -fsS -m 2 -o /dev/null -X POST "$${HOOK_VARIABLE}/${status}" >/dev/null 2>&1; exit 0`;
+  `[ -z "$${HOOK_VARIABLE}" ] || curl -fsS -m 2 -o /dev/null -X POST --data-binary @- "$${HOOK_VARIABLE}/${status}" >/dev/null 2>&1; exit 0`;
 const statusHooks: Record<string, { matcher?: string; status: string }> = {
   SessionStart: { status: 'idle' },
   UserPromptSubmit: { status: 'busy' },

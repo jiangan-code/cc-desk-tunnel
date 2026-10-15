@@ -300,7 +300,7 @@ test(
 );
 
 test(
-  'a connection not back within the grace period is given up on both sides',
+  'a connection beyond grace keeps retrying and rebuilds its tunnel without closing the client',
   linux,
   async (t) => {
     const { url, token, dataDir, fingerprint } = await service(t, { resumeGraceMs: 1500 });
@@ -316,15 +316,14 @@ test(
     const { connectionId } = await next('ready');
     network.drop();
     assert.equal((await next('connection.state')).state, 'reconnecting');
-    const error = await next('connection.error');
-    assert.match(error.message, /网络中断/);
+    await new Promise((resolve) => setTimeout(resolve, 2200));
+    assert.equal(closed, false);
+    network.restore();
+    assert.equal((await next('connection.state')).state, 'connected');
     const deadline = Date.now() + 5000;
-    while (
-      (!closed || existsSync(join(dataDir, 'connections', connectionId))) &&
-      Date.now() < deadline
-    )
+    while (existsSync(join(dataDir, 'connections', connectionId)) && Date.now() < deadline)
       await new Promise((resolve) => setTimeout(resolve, 50));
-    assert.equal(closed, true);
+    assert.equal(closed, false);
     assert.equal(existsSync(join(dataDir, 'connections', connectionId)), false);
   },
 );
@@ -345,9 +344,11 @@ test(
     const again = await openProxyBridge({ url, fingerprint }, {});
     t.after(() => again.close());
     assert.equal((await (await signIn(again, token)).next('ready')).adapter, 'claude-code');
-    // The dropped one learns its connection is gone once the network is back.
+    // The dropped client keeps retrying while another device owns the service; once it leaves, recovery succeeds.
     network.restore();
-    assert.equal((await first.next('connection.error')).code, 'tunnel_failed');
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    await again.close();
+    await until(first.next, 'connection.state', (message) => message.state === 'connected');
   },
 );
 
@@ -556,5 +557,103 @@ test(
       /Environment="PATH=\/home\/u\/.local\/bin:\/usr\/bin"\nEnvironment=ELECTRON_RUN_AS_NODE=1\nExecStart="\/opt\/CC Desk Tunnel\/cc-desk-tunnel" "\/opt\/x\/ccdt.mjs" daemon run/,
     );
     assert.doesNotMatch(unit, /proxy/, 'no proxy credentials in the unit file');
+  },
+);
+
+// Minimal official transcript fixture; only tests synthesize native history, production never rewrites it.
+test(
+  'daemon recovers the exact native conversation after grace, keeping the same CLI view',
+  linux,
+  async (t) => {
+    const { mkdir } = await import('node:fs/promises');
+    const { startDaemon } = await import('../../cli/src/daemon.mjs');
+    const { openConnection } = await import('../../cli/src/connection.mjs');
+    const directory = await mkdtemp(join(tmpdir(), 'recover-native-'));
+    const previous = process.env.CLAUDE_CONFIG_DIR;
+    process.env.CLAUDE_CONFIG_DIR = join(directory, 'config');
+    t.after(async () => {
+      if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+      else process.env.CLAUDE_CONFIG_DIR = previous;
+      await rm(directory, { recursive: true, force: true });
+    });
+    const executable = join(directory, 'claude');
+    await writeFile(
+      executable,
+      '#!/bin/bash\nif [ "$1 $2" = "auth status" ]; then echo \'{"loggedIn":true}\'; exit; fi\necho "args:$*"\nwhile read line; do echo "got:$line"; done\n',
+    );
+    await chmod(executable, 0o755);
+    const { url, token, fingerprint, dataDir } = await service(t, {
+      resumeGraceMs: 1500,
+      claude: { executable },
+    });
+    const network = await outage(t, url);
+    const notices = [];
+    const daemon = await startDaemon(
+      { url: network.url, token, fingerprint, socketPath: join(directory, 'daemon.sock') },
+      (text) => notices.push(text),
+    );
+    t.after(() => daemon.stop());
+    const connection = await openConnection(`ws+unix://${join(directory, 'daemon.sock')}:/`, null);
+    t.after(() => connection.close());
+    const frames = [];
+    connection.onMessage((message) => frames.push(message));
+    const next = async (accept) => {
+      for (let i = 0; i < 2000; i++) {
+        const index = frames.findIndex(accept);
+        if (index >= 0) return frames.splice(index, 1)[0];
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      throw new Error(`missing frame: ${JSON.stringify(frames)}`);
+    };
+    const { sessionId } = await connection.request({
+      type: 'session.create',
+      title: 'recover',
+      projectPath: directory,
+    });
+    await connection.request({ type: 'terminal.open', sessionId, cols: 100, rows: 30 });
+    const { terminalId } = await next((m) => m.type === 'terminal.opened');
+    await next((m) => m.type === 'terminal.data' && m.data.includes('--session-id'));
+    const cwd = join(dataDir, 'native', sessionId);
+    const nativeId = (await readFile(join(cwd, '.ccdt-terminal-session'), 'utf8')).trim();
+    const project = join(
+      process.env.CLAUDE_CONFIG_DIR,
+      'projects',
+      cwd.replace(/[^a-zA-Z0-9]/g, '-'),
+    );
+    await mkdir(project, { recursive: true });
+    await writeFile(
+      join(project, nativeId + '.jsonl'),
+      JSON.stringify({
+        type: 'user',
+        uuid: randomUUID(),
+        sessionId: nativeId,
+        cwd,
+        timestamp: new Date().toISOString(),
+        message: { role: 'user', content: 'remember conversation-context' },
+      }) + '\n',
+    );
+    // A short drop preserves the actual process.
+    network.drop();
+    await next((m) => m.type === 'connection.state' && m.state === 'reconnecting');
+    network.restore();
+    await next((m) => m.type === 'connection.state' && m.state === 'connected');
+    connection.control({ type: 'terminal.input', sessionId, terminalId, data: 'before\r' });
+    await next((m) => m.type === 'terminal.data' && m.data.includes('got:before'));
+    network.drop();
+    await next((m) => m.type === 'connection.state' && m.state === 'reconnecting');
+    await new Promise((resolve) => setTimeout(resolve, 2200));
+    assert.equal(notices.filter((s) => s.includes('持续重试')).length, 2);
+    network.restore();
+    await next((m) => m.type === 'connection.state' && m.recovered);
+    const reopened = await next((m) => m.type === 'terminal.opened');
+    assert.equal(reopened.sessionId, sessionId);
+    assert.equal(reopened.terminalId, terminalId);
+    const args = await next((m) => m.type === 'terminal.data' && m.data.includes('--resume'));
+    assert.ok(args.data.includes(nativeId));
+    if (!args.data.includes('请继续之前未完成的任务'))
+      await next((m) => m.type === 'terminal.data' && m.data.includes('请继续之前未完成的任务'));
+    connection.control({ type: 'terminal.input', sessionId, terminalId, data: 'after\r' });
+    await next((m) => m.type === 'terminal.data' && m.data.includes('got:after'));
+    assert.equal((await readFile(join(cwd, '.ccdt-terminal-session'), 'utf8')).trim(), nativeId);
   },
 );
