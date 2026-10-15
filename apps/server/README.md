@@ -6,7 +6,7 @@ Linux 上的代理服务：认证客户端、管理会话、驱动官方 Claude 
 
 根目录 `npm run dev` 同时启动模拟服务和浏览器 GUI，生成随机服务凭据并写入被忽略的 `.local/dev-connection.json`，控制台不输出 token。默认端口 8787 / 5173，已占用时寻找后续可用端口；以启动输出和本地连接文件为准。会话记录在 `.local/sessions/`。
 
-仅启动服务：在 PowerShell 7 设置 `$env:PROXY_TOKEN`（至少 24 字符）后，从根目录运行 `npm run server`。可选 `PROXY_PORT`、`PROXY_DATA_DIR`、逗号分隔的 `PROXY_ORIGINS`。默认数据目录不受 npm workspace 的 cwd 影响。
+仅启动服务：在 PowerShell 7 设置 `$env:PROXY_TOKEN`（至少 24 字符）后，从根目录运行 `npm run server`。可选 `PROXY_RESUME_GRACE_MS`（断线保留运行窗口，默认 1800000，即 30 分钟；正整数毫秒，最大 2147483647）、`PROXY_PORT`、`PROXY_DATA_DIR`、逗号分隔的 `PROXY_ORIGINS`。默认数据目录不受 npm workspace 的 cwd 影响。
 
 模拟只监听 `127.0.0.1`，`GET /health` 报告适配模式，`/ws` 用首帧认证。默认浏览器来源为本机 5173，以及 Electron 文件页面的 `file://` / 不透明来源 `null`；没有 Origin 的程序客户端也必须认证。不要将模拟 HTTP 原样暴露公网。
 
@@ -29,6 +29,7 @@ Linux 上的代理服务：认证客户端、管理会话、驱动官方 Claude 
 - 会话 model / effort 偏好在下轮传给 SDK，实际值仅按原生报告展示。主动压缩发送原生 `/compact`，转接真实 compact boundary，不自行总结上下文。
 - 原生持久化开启；恢复前官方 getSessionInfo 验证上下文存在，不存在则明确失败，不用 GUI 历史重建。每轮回传原生保存状态。
 - 不改 CLI 或注入代码；已安装可执行文件与官方同版本 Linux 包 SHA256 一致，实际进程 / 环境核对见[原生运行](../../docs/native-runtime.md)。
+- `src/terminal-identity.ts`：记录终端的原生会话 ID（含 hooks 报告的 `/clear` / `/resume` 切换），连接重建时检查原生记录并严格恢复，不降级新对话。
 - `src/native-terminal.ts`：node-pty 直接启动同一官方 CLI，普通 PTY / ANSI 双向传输，不走 SDK、不伪装入口、不提供通用 shell；复用私有提供方进程环境和 Windows SSH 提示词。当前是独立原生控制会话，不恢复图形 session、不导入终端文本到代理历史。所有图形运行 / 会话管理与终端互斥。
 - 终端原始输出仅发所属连接；128 KiB 未确认输出暂停 PTY，低于 32 KiB 恢复，30 秒无回执回收进程。前端回执在 xterm write 完成后发送；终端输入 / 尺寸 / 回执不创建逐键响应缓存。关闭、断连与服务退出结束进程组，不保存终端画面或授权代码。
 

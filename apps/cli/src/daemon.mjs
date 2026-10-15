@@ -62,7 +62,7 @@ export class Hub {
       if (message.type === 'response') this.requests.delete(message.requestId);
       targets = view ? [view] : [];
     } else if (message.type === 'terminal.opened') {
-      const view = this.opening.get(message.sessionId);
+      const view = this.opening.get(message.sessionId) ?? this.owners.get(message.terminalId)?.view;
       this.opening.delete(message.sessionId);
       if (view) this.owners.set(message.terminalId, { view, sessionId: message.sessionId });
       targets = view ? [view] : [];
@@ -128,7 +128,13 @@ export async function startDaemon(
         }
         if (message.type === 'connection.error') failure = message.message;
         if (message.type === 'connection.state')
-          log(message.state === 'reconnecting' ? '网络中断，正在重连。' : '已重新连接。');
+          log(
+            message.state === 'reconnecting'
+              ? '网络中断，持续重试中。'
+              : message.recovered
+                ? '连接已重建，已恢复同一对话并继续任务。'
+                : '已重新连接。',
+          );
         if (!hub.ready) {
           if (message.type !== 'ready') return;
           if (message.adapter !== 'claude-code') {

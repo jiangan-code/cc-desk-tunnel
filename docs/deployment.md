@@ -41,6 +41,8 @@ Compose `unless-stopped`、`tini -g`、30 秒正常停止、日志上限 3 × 10
 
 `--data` 默认 root 初始化为 `/srv/cc-desk-tunnel`，持久化原生 home、代理 state / SQLite / WAL、workspace、配置和证书。目录 0700、秘密文件 0600；容器 uid 1000 可写数据，程序与官方运行时由 root 拥有。备份停止服务保持一致，排除临时 SSH identity，结束恢复原运行状态。恢复只允许空的长期数据目录；卸载保留数据与镜像，不卸宿主 Docker，不自动删除上下文。升级先成功构建再替换，备份与旧镜像 tag 可供回退。
 
+断线宽限期由服务环境变量 `PROXY_RESUME_GRACE_MS` 配置，默认 1800000（30 分钟）。Docker 安装在私有服务环境文件 `config/service.env` 中设置，重新创建容器后生效；客户端与 daemon 必须更新到包含自动恢复的版本。先升级服务，再更新客户端并重启 daemon；已有连接按旧版本行为处理，升级前等待任务收尾。只升级服务可延长保留窗口，但旧客户端超过窗口仍会退出。
+
 ## 信任边界
 
 - VPS 持有连接期 Windows 私钥，权限是当前 Windows 用户，不是项目沙箱；VPS 被攻陷可绕过 Claude 审批直接 SSH。只开回环 / 使用 TLS 不能消除这层授权。

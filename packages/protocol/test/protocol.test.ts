@@ -120,3 +120,17 @@ test('a resume log replays exactly what the other side missed and acknowledges i
   log.flush();
   assert.deepEqual(acknowledged, [64, 65], 'nothing new, no acknowledgment');
 });
+
+test('resume logs bound UTF-8 bytes on both peers and refuse replay across evicted frames', () => {
+  const log = new ResumeLog(() => {}, 6);
+  assert.equal(log.record('中'), true);
+  assert.equal(log.record('文'), true);
+  assert.equal(log.record('字'), false);
+  assert.equal(log.since(0), null);
+  assert.deepEqual(log.since(1), ['文', '字']);
+  for (let i = 0; i < 1000; i++) log.record('界');
+  assert.equal(log.since(1001)?.length, 2);
+  assert.equal(log.since(1000), null);
+  log.confirm(log.sent);
+  assert.deepEqual(log.since(log.sent), []);
+});

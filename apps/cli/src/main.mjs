@@ -332,10 +332,12 @@ async function run(directory, values) {
     let attached = false;
     // A network drop pauses everything until the bridge has the connection back. The list says so on its message
     // line; an agent's screen belongs to Claude Code, so there the window title does.
-    connection.onState((state) => {
+    connection.onState((state, recovered) => {
       const reconnecting = state === 'reconnecting';
       if (attached)
-        process.stdout.write(`\x1b]2;${reconnecting ? 'ccdt：网络中断，正在重连…' : 'ccdt'}\x07`);
+        process.stdout.write(
+          `\x1b]2;${reconnecting ? 'ccdt：网络中断，正在重连…' : recovered ? 'ccdt：已恢复同一对话，继续任务' : 'ccdt'}\x07`,
+        );
       else if (deck.shown) deck.notice(reconnecting ? '网络中断，正在重连…' : '已重新连接。');
       else status(reconnecting ? '网络中断，正在重连 …' : '已重新连接 …');
     });

@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { createWriteStream } from 'node:fs';
 import { createServer, request } from 'node:http';
 import { isIP } from 'node:net';
@@ -11,6 +11,9 @@ import { startLinuxTunnel } from './linux-tunnel.mjs';
 import { opened } from './relay.mjs';
 import { startWindowsTunnel } from './windows-tunnel.mjs';
 import { httpProxy, openSocket } from './system-proxy.mjs';
+
+// No retry budget: only the delay is capped, including after the original transport expires.
+export const reconnectDelay = (attempt) => Math.min(500 * 2 ** Math.min(attempt, 4), 5000);
 
 export function certificateMatches(observed, trusted) {
   if (typeof trusted !== 'string' || typeof observed !== 'string') return false;
@@ -156,6 +159,20 @@ export async function openProxyBridge(
     let log = null;
     let counting = false;
     let reconnecting = false;
+    let recovering = false;
+    let retryAttempt = 0;
+    const terminals = new Map();
+    const terminalIds = new Map();
+    const recoveryRequests = new Map();
+    const recoveryTimers = new Set();
+    function recoverTerminal(terminal) {
+      if (closed) return;
+      const requestId = randomUUID();
+      recoveryRequests.set(requestId, terminal);
+      const { terminalId, ...command } = terminal;
+      forward(JSON.stringify({ ...command, requestId, continue: true, recover: true }));
+    }
+    const pendingRequests = new Set();
     const timer = setTimeout(() => fail('本机 SSH 连接准备超时。'), 45000);
     function fail(message) {
       if (local.readyState === WebSocket.OPEN)
@@ -192,6 +209,14 @@ export async function openProxyBridge(
           forward(JSON.stringify(message), false);
           return;
         }
+        if (message.requestId) pendingRequests.add(message.requestId);
+        if (message.type === 'terminal.open') {
+          const previous = terminals.get(message.sessionId);
+          terminals.set(message.sessionId, { ...previous, ...message });
+        }
+        if (message.type === 'terminal.close') terminals.delete(message.sessionId);
+        if (message.terminalId && terminalIds.has(message.terminalId))
+          message.terminalId = terminalIds.get(message.terminalId);
         forward(JSON.stringify(message));
       } catch {
         fail('客户端消息格式错误。');
@@ -205,11 +230,56 @@ export async function openProxyBridge(
         fail('服务协议不兼容。');
         return;
       }
+      if (recovering && message.type === 'connection.error' && message.code === 'device_busy') {
+        current.remote.terminate();
+        return;
+      }
       if (message.type === 'resume.ack') {
         log?.confirm(message.received);
         return;
       }
       if (counting) log?.receive();
+      if (message.type === 'response') pendingRequests.delete(message.requestId);
+      if (message.type === 'response' && recoveryRequests.has(message.requestId)) {
+        const terminal = recoveryRequests.get(message.requestId);
+        recoveryRequests.delete(message.requestId);
+        if (!message.ok) {
+          toLocal({ type: 'connection.state', state: 'reconnecting' });
+          const retry = setTimeout(() => {
+            recoveryTimers.delete(retry);
+            if (terminals.has(terminal.sessionId)) recoverTerminal(terminal);
+          }, 5000);
+          recoveryTimers.add(retry);
+        } else toLocal({ type: 'connection.state', state: 'connected', recovered: true });
+        return;
+      }
+      if (message.type === 'terminals.state') {
+        for (const state of message.terminals) {
+          const terminal = terminals.get(state.sessionId);
+          if (terminal && state.profile !== undefined) terminal.profile = state.profile;
+          if (terminal?.terminalId) state.terminalId = terminal.terminalId;
+          else {
+            const logical = [...terminalIds].find(([, actual]) => actual === state.terminalId)?.[0];
+            if (logical) state.terminalId = logical;
+          }
+        }
+        raw = JSON.stringify(message);
+      }
+      if (message.type === 'terminal.opened') {
+        const terminal = terminals.get(message.sessionId);
+        if (terminal) {
+          if (terminal.terminalId) terminalIds.set(terminal.terminalId, message.terminalId);
+          else terminal.terminalId = message.terminalId;
+        }
+      }
+      if (message.type?.startsWith('terminal.') && message.terminalId) {
+        const terminal = terminals.get(message.sessionId);
+        if (terminal?.terminalId) {
+          message.terminalId = terminal.terminalId;
+          raw = JSON.stringify(message);
+        }
+        if (message.type === 'terminal.closed') terminals.delete(message.sessionId);
+      }
       // A service of another version refuses the connection but may still offer the installer for its own.
       if (message.type === 'connection.error' && message.client) release = message.client;
       if (message.type === 'ready') {
@@ -234,7 +304,13 @@ export async function openProxyBridge(
           message,
           relay ? { schedulesPath: binaries.schedulesPath, openRelay } : binaries,
           current.controller.signal,
-          fail,
+          (message) => {
+            // A relay refusal during a drop means the old transport expired, not that the conversation did.
+            if (reconnecting) {
+              recovering = true;
+              current.controller.abort();
+            } else fail(message);
+          },
         )
           .then((tunnel) => {
             current.tunnel = tunnel;
@@ -253,7 +329,25 @@ export async function openProxyBridge(
           return;
         }
         clearTimeout(timer);
-        toLocal(nativeReady);
+        retryAttempt = 0;
+        if (recovering) {
+          if (!nativeReady.terminalRecovery)
+            return fail('服务端不支持原生对话自动恢复，请升级服务端；未新建对话。');
+          recovering = false;
+          reconnecting = false;
+          for (const requestId of pendingRequests)
+            toLocal({
+              type: 'response',
+              requestId,
+              ok: false,
+              code: 'connection_lost',
+              message: '连接已重建；请求结果未确认，未自动重放。',
+            });
+          pendingRequests.clear();
+          for (const terminal of terminals.values()) recoverTerminal(terminal);
+          if (!terminals.size)
+            toLocal({ type: 'connection.state', state: 'connected', recovered: true });
+        } else toLocal(nativeReady);
       } else if (local.readyState === WebSocket.OPEN) {
         if (message.type === 'ready') clearTimeout(timer);
         local.send(raw.toString('utf8'));
@@ -269,7 +363,8 @@ export async function openProxyBridge(
       remote.on('close', (code) => {
         if (remote !== current.remote || closed) return;
         // The service's own refusals (4xxx) and a deliberate close end the connection; anything else is the network.
-        if (granted && code < 4000 && code !== 1000) void reconnect();
+        if (granted && ((code < 4000 && code !== 1000) || (recovering && code === 4003)))
+          void reconnect();
         else {
           clearTimeout(timer);
           void close(true);
@@ -304,15 +399,12 @@ export async function openProxyBridge(
       verified = false;
       toLocal({ type: 'connection.state', state: 'reconnecting' });
       const deadline = Date.now() + granted.graceMs;
-      for (let attempt = 0; !closed; attempt++) {
-        if (attempt)
-          await new Promise((resolve) => setTimeout(resolve, Math.min(500 * 2 ** attempt, 5000)));
+      while (!closed) {
+        await new Promise((resolve) => setTimeout(resolve, reconnectDelay(retryAttempt++)));
         if (closed) return;
         if (Date.now() > deadline) {
-          fail(
-            `网络中断超过 ${Math.round(granted.graceMs / 60000)} 分钟，原来的运行已结束，请重新连接。`,
-          );
-          return;
+          recovering = true;
+          current.controller.abort();
         }
         if (await resume()) return;
       }
@@ -347,7 +439,11 @@ export async function openProxyBridge(
           if (!pinned(remote)) return refuse('服务证书指纹不匹配；未发送服务凭据。');
           const { connectionId, key } = granted;
           remote.send(
-            JSON.stringify({ ...auth, resume: { connectionId, key, received: log.received } }),
+            JSON.stringify(
+              recovering
+                ? auth
+                : { ...auth, resume: { connectionId, key, received: log.received } },
+            ),
           );
         });
         remote.once('message', (raw) => {
@@ -357,17 +453,52 @@ export async function openProxyBridge(
           } catch {
             return refuse('服务协议不兼容。');
           }
+          if (message.type === 'connection.error' && message.code === 'resume_failed') {
+            recovering = true;
+            remote.terminate();
+            return done(false);
+          }
+          if (recovering && message.type === 'ready') {
+            current.controller.abort();
+            current.controller = new AbortController();
+            current.tunnel = null;
+            configurationReceived = false;
+            counting = false;
+            recoveryRequests.clear();
+            for (const retry of recoveryTimers) clearTimeout(retry);
+            recoveryTimers.clear();
+            log?.stop();
+            log = new ResumeLog((received) => {
+              if (live()) current.remote.send(JSON.stringify({ type: 'resume.ack', received }));
+            });
+            verified = true;
+            reconnecting = false;
+            queue.length = 0;
+            use(remote);
+            receive(raw);
+            done(true);
+            return;
+          }
+          if (message.type === 'connection.error' && message.code === 'device_busy' && recovering) {
+            remote.terminate();
+            return done(false);
+          }
           if (message.type !== 'resumed')
             return refuse(
               message.type === 'connection.error' ? message.message : '服务协议不兼容。',
             );
           const frames = log.since(message.received);
-          if (!frames) return refuse('续接失败：本机消息记录不完整，请重新连接。');
+          if (!frames) {
+            recovering = true;
+            remote.close(1000);
+            return done(false);
+          }
           if (closed) {
             remote.terminate();
             return done(true);
           }
           log.confirm(message.received);
+          retryAttempt = 0;
           reconnecting = false;
           verified = true;
           use(remote);
@@ -381,6 +512,7 @@ export async function openProxyBridge(
     local.on('close', () => {
       clearTimeout(timer);
       log?.stop();
+      for (const retry of recoveryTimers) clearTimeout(retry);
       void close(true);
     });
     local.on('error', (error) => fail(failure(error)));

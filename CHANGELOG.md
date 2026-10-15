@@ -4,6 +4,8 @@
 
 ## 未发布
 
+- 网络中断不再让 `ccdt` / daemon 丢掉会话：默认保留运行 30 分钟（服务端 `PROXY_RESUME_GRACE_MS` 可配），超过窗口或服务重启后无限退避重连，以同一会话的原生 `--resume <id>` 继续任务，`--single` 窗格不退出。传输重放日志提高到每端 64 MiB 并严格有界，超限转会话恢复；不伪造工具成功、不重放未知副作用。协议兼容增量扩展，版本不变；需同时更新服务和客户端才能自动恢复。见[断线续接](docs/linux-desktop.md#断线续接)。
+
 - `ccdt` 按终端选择 Claude 账号：`--account <名字>` 支持新建、续接和 `--single`，不改变服务端当前账号，账号不存在或未登录时拒绝启动。`ccdt accounts [--json]` 查询账号，`ccdt ls --json` 的运行终端带实际 `profile`。协议增量扩展，版本不变；旧服务端会明确提示不支持。**服务端部分需要重新部署后生效。**见[多个 Claude 账号](docs/multi-account.md#为单个会话选择账号)。
 - `ccdt-tunnel`：经 `ssh -L` 连接服务时，让这条转发始终走本机代理（TUN、v2rayN 或 Clash Verge 的本机端口），代理开关或切换后 15 秒内自动换线路。此前转发若先于代理建立，会一直停在直连上，实测往返从约 165 ms 变成 300–860 ms，`ccdt` 里打字和滚动明显卡顿。见 [apps/cli](apps/cli/README.md#经-ssh-隧道连接服务)。
 - 多个 Claude 账号：服务端可以登录多个账号（官方 `CLAUDE_CONFIG_DIR`，每个账号一个配置目录），选定的当前账号用于之后新开的 agent 和运行；对话各账号共用，换号后可以接着同一段对话。`ccdt` 列表里按 `a` 切换或新建账号。协议增量扩展，未升版本，旧客户端照常可用。见[多个 Claude 账号](docs/multi-account.md)。

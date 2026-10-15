@@ -45,9 +45,14 @@ export function terminalArguments(
   session: Session,
   ssh: SshConnection,
   continued = false,
+  nativeId?: string,
 ) {
   return [
-    ...(continued ? ['--continue'] : []),
+    ...(nativeId
+      ? [continued ? '--resume' : '--session-id', nativeId]
+      : continued
+        ? ['--continue']
+        : []),
     '--permission-mode',
     session.permissionMode === 'default' ? 'manual' : session.permissionMode,
     '--append-system-prompt',

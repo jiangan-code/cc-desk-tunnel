@@ -114,7 +114,7 @@ export function openConnection(url, token, { timeoutMs = 60000 } = {}) {
       }
       for (const listener of messageListeners) listener(message);
       if (message.type === 'connection.state') {
-        for (const listener of stateListeners) listener(message.state);
+        for (const listener of stateListeners) listener(message.state, message.recovered ?? false);
       } else if (message.type.startsWith('terminal.')) {
         for (const listener of listeners) listener(message);
       }

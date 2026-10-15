@@ -1,5 +1,6 @@
 import { randomBytes, randomUUID, createHash, timingSafeEqual } from 'node:crypto';
 import { createReadStream } from 'node:fs';
+import { rememberTerminalIdentity, terminalIdentity } from './terminal-identity.ts';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
 import type { IncomingMessage, RequestListener } from 'node:http';
@@ -9,7 +10,6 @@ import {
   deleteSession,
   forkSession,
   getSessionMessages,
-  listSessions,
   renameSession,
 } from '@anthropic-ai/claude-agent-sdk';
 import {
@@ -183,14 +183,26 @@ export function createProxyServer(options: ServerOptions) {
   let hookAddress = '';
   const hookServer = options.claude
     ? createServer((request, response) => {
-        request.resume();
         const [, terminalId, secret, status] =
           /^\/terminal\/([^/]+)\/([^/]+)\/([a-z]+)$/.exec(request.url ?? '') ?? [];
         const current = terminalId ? terminals.get(terminalId) : undefined;
         const parsed = terminalStatusSchema.safeParse(status);
-        if (request.method !== 'POST' || !current || secret !== hookSecret || !parsed.success)
+        if (request.method !== 'POST' || !current || secret !== hookSecret || !parsed.success) {
+          request.resume();
           response.writeHead(404).end();
-        else {
+        } else {
+          // Native hooks supply the current session ID, including after /clear or /resume.
+          // Keep only that identity, never the hook's transcript or tool arguments.
+          let body = '';
+          request.on('data', (chunk) => {
+            if (body.length <= 65536) body += chunk.toString('utf8');
+          });
+          request.on('end', () => {
+            rememberTerminalIdentity(
+              nativeDirectory(store.directory, nativeRoot(current.sessionId)),
+              body,
+            );
+          });
           setStatus(current, parsed.data);
           response.writeHead(204).end();
         }
@@ -221,7 +233,7 @@ export function createProxyServer(options: ServerOptions) {
       )
     : undefined;
   const throttle = new Throttle();
-  const graceMs = options.resumeGraceMs ?? 180000;
+  const graceMs = options.resumeGraceMs ?? 1800000;
   // Behind the reverse proxy every socket comes from the proxy itself; it passes the client on in X-Real-IP.
   const addressOf = (request: IncomingMessage) =>
     (options.reverseProxy && [request.headers['x-real-ip']].flat()[0]) ||
@@ -312,6 +324,7 @@ export function createProxyServer(options: ServerOptions) {
     if (!peer.detached) return;
     clearTimeout(peer.detached);
     peer.detached = undefined;
+    peer.resume?.log.stop();
     peer.resume = undefined;
     const owned = [...runs.values()].filter((run) => run.owner === peer).length;
     console.log(`Connection ${peer.id.slice(0, 8)} given up: ${why}; runs ended with it: ${owned}`);
@@ -707,17 +720,23 @@ export function createProxyServer(options: ServerOptions) {
       trustDirectory(cwd, profiles.directory(current.profile));
       // Runs and terminals of a session share this directory, so the latest conversation may be either. Without one,
       // `--continue` would end the CLI at once.
-      const continued =
-        !!command.continue &&
-        (await listSessions({ dir: cwd, limit: 1 }).then(
-          (found) => found.length > 0,
-          () => false,
-        ));
+      const { id: nativeId, continued } = await terminalIdentity(
+        cwd,
+        command.continue,
+        command.recover,
+      );
       if (closing || peer.socket.readyState !== WebSocket.OPEN)
         throw new Error('Connection closed');
       current.process = new NativeTerminal(
         options.claude.executable,
-        terminalArguments(options.claude, session, peer.tunnel.ssh, continued),
+        [
+          ...terminalArguments(options.claude, session, peer.tunnel.ssh, continued, nativeId),
+          ...(command.recover
+            ? [
+                '网络连接已恢复，请继续之前未完成的任务。中断的工具结果可能未知，请先核实，不要假定成功。',
+              ]
+            : []),
+        ],
         {
           cwd,
           cols: command.cols,
@@ -1150,6 +1169,7 @@ export function createProxyServer(options: ServerOptions) {
     send(peer, {
       type: 'ready',
       protocolVersion: PROTOCOL_VERSION,
+      terminalRecovery: true,
       connectionId: peer.id,
       adapter,
       model: options.claude?.model,
