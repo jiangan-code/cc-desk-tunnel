@@ -1,6 +1,15 @@
 import { spawn } from 'node:child_process';
 import { homedir, userInfo } from 'node:os';
 
+// The one variable a command takes from the service: the session that ran it (`CCDT_SESSION_ID`, which the service
+// sets for each CLI process). The command gets it as CCDT_REMOTE_SESSION_ID, named for what it is on this desktop.
+const SESSION_ID = /^[A-Za-z0-9-]{1,128}$/;
+export function acceptedEnvironment(key, value) {
+  return key === 'CCDT_SESSION_ID' && typeof value === 'string' && SESSION_ID.test(value)
+    ? ['CCDT_REMOTE_SESSION_ID', value]
+    : null;
+}
+
 // A per-connection SSH exec endpoint, owned by the desktop user. No password,
 // forwarding, PTY, SFTP or interactive shell is exposed.
 export async function startLinuxSsh() {
@@ -41,10 +50,18 @@ export async function startLinuxSsh() {
     client.on('ready', () =>
       client.on('session', (accept) => {
         const session = accept();
+        // Never inherited from this process, so a command that did not send it has none.
+        const { CCDT_REMOTE_SESSION_ID: _inherited, ...env } = process.env;
+        session.on('env', (accept, reject, info) => {
+          const entry = acceptedEnvironment(info.key, info.val);
+          if (entry) env[entry[0]] = entry[1];
+          (entry ? accept : reject)?.();
+        });
         session.on('exec', (accept, _reject, info) => {
           const stream = accept();
           const child = spawn('/bin/bash', ['-c', info.command], {
             cwd: homedir(),
+            env,
             detached: true,
             stdio: ['pipe', 'pipe', 'pipe'],
           });

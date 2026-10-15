@@ -6,7 +6,7 @@ import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import ssh2 from 'ssh2';
-import { startLinuxSsh } from '../electron/linux-ssh.mjs';
+import { acceptedEnvironment, startLinuxSsh } from '../electron/linux-ssh.mjs';
 import { pathKey, withProject, folderName, isInside } from '../src/paths.ts';
 const execute = promisify(execFile);
 
@@ -119,5 +119,67 @@ test(
     assert.ok(pid > 0);
     await server.close();
     assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
+  },
+);
+
+test('Linux SSH takes only the session id from the service', () => {
+  assert.deepEqual(acceptedEnvironment('CCDT_SESSION_ID', 'b03ef9e9-9e49'), [
+    'CCDT_REMOTE_SESSION_ID',
+    'b03ef9e9-9e49',
+  ]);
+  for (const key of ['CCDT_REMOTE_SESSION_ID', 'CLAUDE_CODE_SESSION_ID', 'PATH', 'FM_TASK'])
+    assert.equal(acceptedEnvironment(key, 'v'), null, key);
+  for (const value of ['', 'a b', 'a;b', 'x'.repeat(129), undefined])
+    assert.equal(acceptedEnvironment('CCDT_SESSION_ID', value), null, String(value));
+});
+
+test(
+  'Linux SSH hands the sending session to the command, and nothing else',
+  { skip: process.platform !== 'linux' },
+  async (t) => {
+    const server = await startLinuxSsh();
+    const directory = await mkdtemp(join(tmpdir(), 'linux-ssh-env-test-'));
+    t.after(async () => {
+      await server.close();
+      await rm(directory, { recursive: true, force: true });
+    });
+    await writeFile(join(directory, 'key'), server.privateKey, { mode: 0o600 });
+    await writeFile(
+      join(directory, 'known'),
+      `[127.0.0.1]:${server.port} ${server.hostPublicKey}\n`,
+    );
+    const run = (env) =>
+      execute(
+        'ssh',
+        [
+          '-F',
+          '/dev/null',
+          '-p',
+          String(server.port),
+          '-i',
+          join(directory, 'key'),
+          '-o',
+          'IdentitiesOnly=yes',
+          '-o',
+          'BatchMode=yes',
+          '-o',
+          `UserKnownHostsFile=${join(directory, 'known')}`,
+          '-o',
+          'SendEnv=CCDT_SESSION_ID CCDT_REMOTE_SESSION_ID FM_TASK_ID',
+          `${server.username}@127.0.0.1`,
+          'printf "%s|%s" "${CCDT_REMOTE_SESSION_ID-unset}" "${FM_TASK_ID-unset}"',
+        ],
+        { timeout: 10000, env: { ...process.env, ...env } },
+      ).then(({ stdout }) => stdout);
+    assert.equal(
+      await run({
+        CCDT_SESSION_ID: 'session-1',
+        CCDT_REMOTE_SESSION_ID: 'forged',
+        FM_TASK_ID: 't',
+      }),
+      'session-1|unset',
+    );
+    // A command that names no session gets none, even one it forges.
+    assert.equal(await run({ CCDT_REMOTE_SESSION_ID: 'forged' }), 'unset|unset');
   },
 );

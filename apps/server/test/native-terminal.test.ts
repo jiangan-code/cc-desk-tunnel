@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { NativeTerminal, terminalArguments, terminalEnvironment } from '../src/native-terminal.ts';
-import { completeOnboarding } from '../src/native-onboarding.ts';
+import { completeOnboarding, trustDirectory } from '../src/native-onboarding.ts';
+import { withStatusHooks } from '../src/claude.ts';
 import { NativeLogin, parseAccountStatus } from '../src/native-account.ts';
 import type { TerminalSpawner } from '../src/native-terminal.ts';
 import type { Session } from '@cc-desk-tunnel/protocol';
@@ -198,6 +199,37 @@ test('a signed-in account skips the first-run wizard; a signed-out one keeps it'
     hasCompletedOnboarding: true,
   });
   assert.equal(completeOnboarding(directory), false);
+});
+
+test('a turn an API error ended reads idle, like a finished one', () => {
+  const { hooks } = withStatusHooks({});
+  const command = (event: string) => hooks[event]?.[0]?.hooks?.[0]?.command ?? '';
+  assert.match(command('StopFailure'), /\/idle"/);
+  assert.equal(command('StopFailure'), command('Stop'));
+});
+
+test("a terminal's directory is trusted for its account up front; other projects are kept", (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'cc-desk-tunnel-trust-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const statePath = join(directory, '.claude.json');
+  const session = '/data/native/s1';
+  assert.equal(trustDirectory(session, directory), false);
+  writeFileSync(
+    statePath,
+    JSON.stringify({
+      userID: 'kept',
+      projects: { '/other': { hasTrustDialogAccepted: false }, [session]: { allowedTools: ['x'] } },
+    }),
+  );
+  assert.equal(trustDirectory(session, directory), true);
+  assert.deepEqual(JSON.parse(readFileSync(statePath, 'utf8')), {
+    userID: 'kept',
+    projects: {
+      '/other': { hasTrustDialogAccepted: false },
+      [session]: { allowedTools: ['x'], hasTrustDialogAccepted: true },
+    },
+  });
+  assert.equal(trustDirectory(session, directory), false);
 });
 
 test('official sign-in: the link is read from the command output, the pasted code is typed back, exit decides the result', async () => {

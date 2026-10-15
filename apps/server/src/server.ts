@@ -37,6 +37,7 @@ import type {
 } from '@cc-desk-tunnel/protocol';
 import {
   hookEnvironment,
+  sessionEnvironment,
   runClaude,
   nativeDirectory,
   prepareNativeDirectory,
@@ -48,7 +49,7 @@ import { DomainError } from './errors.ts';
 import type { NativeLogin } from './native-account.ts';
 import { NativeInput } from './native-input.ts';
 import { RelayTunnel } from './relay.ts';
-import { completeOnboarding } from './native-onboarding.ts';
+import { completeOnboarding, trustDirectory } from './native-onboarding.ts';
 import { AccountProfiles } from './native-profiles.ts';
 import { readNativeSettings, settingsPath, updateNativeSettings } from './native-settings.ts';
 import type { NativeTerminal } from './native-terminal.ts';
@@ -671,6 +672,7 @@ export function createProxyServer(options: ServerOptions) {
         throw new Error('Connection closed');
       completeOnboarding(profiles.directory(current.profile));
       const cwd = prepareNativeDirectory(options.claude, store.directory, nativeRoot(session.id));
+      trustDirectory(cwd, profiles.directory(current.profile));
       // Runs and terminals of a session share this directory, so the latest conversation may be either. Without one,
       // `--continue` would end the CLI at once.
       const continued =
@@ -691,6 +693,7 @@ export function createProxyServer(options: ServerOptions) {
           env: {
             ...terminalEnvironment(claudeAs(current.profile)),
             ...hookEnvironment(`${hookAddress}/${current.id}/${hookSecret}`),
+            ...sessionEnvironment(session.id),
           },
         },
         (data, bytes) =>
