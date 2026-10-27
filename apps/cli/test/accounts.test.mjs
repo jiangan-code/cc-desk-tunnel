@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -21,7 +22,7 @@ const profiles = [
 ];
 
 // A private stand-in for the daemon; no saved credentials, system service or remote CLI is touched.
-async function daemon(t, { legacy = false, rejectProfile = false } = {}) {
+async function daemon(t, { legacy = false, rejectProfile = false, others = [] } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'ccdt-accounts-'));
   const server = createServer();
   const wss = new WebSocketServer({ server });
@@ -43,7 +44,7 @@ async function daemon(t, { legacy = false, rejectProfile = false } = {}) {
       connectionId: terminalId,
       adapter: 'claude-code',
       version: '0.2.5',
-      sessions: [session],
+      sessions: [session, ...others],
     });
     socket.on('message', (raw) => {
       const command = JSON.parse(raw.toString());
@@ -103,6 +104,20 @@ async function daemon(t, { legacy = false, rejectProfile = false } = {}) {
     requests,
     execute: (args) =>
       promisify(execFile)(process.execPath, [cli, ...args], { env, timeout: 10000 }),
+    // A reader as slow as jq: the pipe is read only once the CLI has closed its connection, i.e. finished printing.
+    slowRead: (args) => {
+      const printed = join(directory, 'printed');
+      wss.once('connection', (socket) => socket.once('close', () => void writeFile(printed, '')));
+      return promisify(execFile)(
+        'sh',
+        ['-c', '"$@" | { until [ -e "$PRINTED" ]; do sleep 0.05; done; cat; }', 'sh'].concat(
+          process.execPath,
+          cli,
+          args,
+        ),
+        { env: { ...env, PRINTED: printed }, timeout: 10000 },
+      );
+    },
     terminal: (args) =>
       new Promise((resolve, reject) => {
         child = spawn(process.execPath, [cli, directory, ...args], { env, cols: 120, rows: 40 });
@@ -137,6 +152,23 @@ test('accounts prints JSON or a Chinese table and ls includes the running accoun
   assert.ok(
     fake.requests.every((request) => ['account.status', 'terminal.list'].includes(request.type)),
   );
+});
+
+// Over a pipe, output beyond its 64 KiB buffer is written asynchronously; exiting before it drains cuts it off.
+test('ls --json larger than a pipe buffer reaches a pipe whole', async (t) => {
+  const now = new Date().toISOString();
+  const others = Array.from({ length: 800 }, (_, index) => ({
+    id: randomUUID(),
+    title: `agent ${index} ${'x'.repeat(80)}`,
+    projectPath: `/home/user/projects/agent-${index}`,
+    createdAt: now,
+    updatedAt: now,
+    activeRun: null,
+  }));
+  const fake = await daemon(t, { others });
+  const { stdout } = await fake.slowRead(['ls', '--json']);
+  assert.ok(stdout.length > 64 * 1024);
+  assert.equal(JSON.parse(stdout).length, others.length + 1);
 });
 
 test('accounts against a service without multi-account support exits 3 on stderr', async (t) => {
