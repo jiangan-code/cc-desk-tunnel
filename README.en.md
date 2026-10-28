@@ -191,6 +191,7 @@ The local `ccdt codex-pool` commands keep independent file-backed `CODEX_HOME` d
 ccdt codex-pool import work current                 # read ~/.codex/auth.json
 ccdt codex-pool import personal /path/to/auth.json
 ccdt codex-pool import-cockpit other /path/to/codex_accounts/ACCOUNT_ID.json
+ccdt codex-pool import-cockpit-export /path/to/cockpit-export.json
 ccdt codex-pool list
 ccdt codex-pool refresh                              # or refresh NAME
 ccdt codex-pool pick                                 # JSON
@@ -198,7 +199,7 @@ ccdt codex-pool pick --env                           # CODEX_HOME=<path>
 ccdt codex-pool remove personal
 ```
 
-Cockpit account detail files are normally in `~/.antigravity_cockpit/codex_accounts/` (the installation may use a legacy data directory). Import reads them only. API-key and agent-identity accounts do not provide this subscription quota and are not supported. Account directories are private and auth files have mode 0600. Import copies credentials; a refresh token can be rotated by Codex in either copy, so sharing the same login with another active home can require reauthentication. Refresh only queries `wham/usage` with the stored access token; it does not renew credentials. If it fails, log in separately with `CODEX_HOME=<pool directory> codex login` or re-import after removing the old entry.
+The export command imports Cockpit Tools portable JSON records, naming accounts by a hash of their account ID; existing names and unsupported records count as failures. Cockpit account detail files are normally in `~/.antigravity_cockpit/codex_accounts/` (the installation may use a legacy data directory). Import reads them only. API-key and agent-identity accounts do not provide this subscription quota and are not supported. Account directories are private and auth files have mode 0600. Import copies credentials; a refresh token can be rotated by Codex in either copy, so sharing the same login with another active home can require reauthentication. Refresh only queries `wham/usage` with the stored access token; it does not renew credentials. If it fails, log in separately with `CODEX_HOME=<pool directory> codex login` or re-import after removing the old entry.
 
 Refresh returns 5-hour and weekly remaining percentages, reset times and a timestamp without a model turn. Missing or invalid windows and reported rate limits fail refresh. Selection ignores failed, missing or over-15-minute-old snapshots, accounts with no 5-hour quota, and accounts with 5% or less weekly quota. It ranks by 5-hour remaining, then weekly remaining. Refresh failure invalidates that account's cached quota. Quota is a snapshot, not a reservation; concurrent workers may consume it after selection.
 
