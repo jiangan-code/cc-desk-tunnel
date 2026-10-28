@@ -1,3 +1,4 @@
+import { codexPool } from './codex-pool.mjs';
 import { realpath, stat } from 'node:fs/promises';
 import { basename, resolve } from 'node:path';
 import { createInterface } from 'node:readline/promises';
@@ -29,6 +30,7 @@ const USAGE = `用法：
   ccdt [目录]            在目录（默认当前目录）上打开远端原版 Claude Code
   ccdt deck [目录]       先打开 agent 列表
   ccdt ls [目录]         列出 agent 和它们此刻的状态（需要后台服务）；--json 输出 JSON
+  ccdt codex-pool        Manage local Codex account homes and quota
   ccdt accounts          列出服务端账号和登录状态；--json 输出 JSON，旧服务端退出码为 3
   ccdt rm <会话 ID>…     删除已停止的 agent 和它的对话（需要后台服务）
   ccdt daemon install    装成 systemd 用户服务：关掉终端 agent 也继续运行
@@ -61,6 +63,14 @@ const status = (text) => process.stderr.write(`\r\x1b[2K\x1b[2m${text}\x1b[0m`);
 const clearStatus = () => process.stderr.write('\r\x1b[2K');
 
 export async function main(argv) {
+  if (argv[0] === 'codex-pool') {
+    try {
+      return await codexPool(argv.slice(1));
+    } catch (error) {
+      console.error(`codex-pool: ${error.message}`);
+      return 1;
+    }
+  }
   let parsed;
   try {
     parsed = parseArgs({
