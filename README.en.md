@@ -182,3 +182,33 @@ We recognize [LINUX DO](https://linux.do/) and its values of sincerity, friendli
 ## License
 
 [Apache License 2.0](LICENSE). Bundled third-party components and their licenses are listed in [NOTICE](NOTICE).
+
+## Codex account pool
+
+The local `ccdt codex-pool` commands keep independent file-backed `CODEX_HOME` directories under `~/.local/share/ccdt/codex-pool` (override with `CCDT_CODEX_POOL`). They do not switch or write the active `~/.codex` account. Import ChatGPT OAuth `auth.json` credentials with an explicit account name:
+
+```sh
+ccdt codex-pool import work current                 # read ~/.codex/auth.json
+ccdt codex-pool import personal /path/to/auth.json
+ccdt codex-pool import-cockpit other /path/to/codex_accounts/ACCOUNT_ID.json
+ccdt codex-pool list
+ccdt codex-pool refresh                              # or refresh NAME
+ccdt codex-pool pick                                 # JSON
+ccdt codex-pool pick --env                           # CODEX_HOME=<path>
+ccdt codex-pool remove personal
+```
+
+Cockpit account detail files are normally in `~/.antigravity_cockpit/codex_accounts/` (the installation may use a legacy data directory). Import reads them only. API-key and agent-identity accounts do not provide this subscription quota and are not supported. Account directories are private and auth files have mode 0600. Import copies credentials; a refresh token can be rotated by Codex in either copy, so sharing the same login with another active home can require reauthentication. Refresh only queries `wham/usage` with the stored access token; it does not renew credentials. If it fails, log in separately with `CODEX_HOME=<pool directory> codex login` or re-import after removing the old entry.
+
+Refresh returns 5-hour and weekly remaining percentages, reset times and a timestamp without a model turn. Missing or invalid windows and reported rate limits fail refresh. Selection ignores failed, missing or over-15-minute-old snapshots, accounts with no 5-hour quota, and accounts with 5% or less weekly quota. It ranks by 5-hour remaining, then weekly remaining. Refresh failure invalidates that account's cached quota. Quota is a snapshot, not a reservation; concurrent workers may consume it after selection.
+
+Firstmate's spawner should refresh before selecting, stop on failure or an empty pool, and pass the selected home directly to the worker. For example, with `jq`:
+
+```sh
+ccdt codex-pool refresh || exit 1
+selection=$(ccdt codex-pool pick) || exit 1
+codex_home=$(printf '%s\n' "$selection" | jq -er '.codexHome') || exit 1
+CODEX_HOME="$codex_home" codex <worker arguments>
+```
+
+`--env` is intended for launchers that parse the single `CODEX_HOME=` line as data; its value is not shell-quoted and should not be passed to `eval`.
