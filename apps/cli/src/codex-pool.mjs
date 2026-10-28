@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { chmod, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -127,6 +128,7 @@ async function refresh(name) {
     headers,
     signal: AbortSignal.timeout(15000),
   });
+  if (response.status === 401) throw new Error('stale-auth');
   if (!response.ok) throw new Error(`Quota request failed (HTTP ${response.status}).`);
   const body = await response.json();
   if (body.account_id && auth.tokens.account_id && body.account_id !== auth.tokens.account_id)
@@ -154,6 +156,29 @@ export async function codexPool(args) {
       ...(account.last_refresh ? { last_refresh: account.last_refresh } : {}),
     });
     console.log(JSON.stringify({ name, codexHome: home(name) }));
+  } else if (command === 'import-cockpit-export' && rest.length === 1) {
+    const data = await readJson(resolve(rest[0]));
+    const accounts = Array.isArray(data) ? data : [data];
+    let imported = 0;
+    let failed = 0;
+    for (const account of accounts) {
+      try {
+        if (!account || typeof account.account_id !== 'string' || !account.account_id)
+          throw new Error('Missing account identity.');
+        const name = `cockpit-${createHash('sha256').update(account.account_id).digest('hex').slice(0, 24)}`;
+        await importAuth(name, {
+          auth_mode: 'chatgpt',
+          tokens: { id_token: account.id_token, access_token: account.access_token,
+            refresh_token: account.refresh_token, account_id: account.account_id },
+          ...(account.last_refresh ? { last_refresh: account.last_refresh } : {}),
+        });
+        imported++;
+      } catch {
+        failed++;
+      }
+    }
+    console.log(JSON.stringify({ imported, failed }));
+    if (failed) return 1;
   } else if (command === 'remove' && rest.length === 1) {
     const dir = home(rest[0]);
     if (!(await names()).includes(rest[0])) throw new Error('Account not found.');
@@ -164,9 +189,10 @@ export async function codexPool(args) {
     for (const name of selected) {
       try {
         console.log(JSON.stringify({ name, quota: await refresh(name) }));
-      } catch {
+      } catch (error) {
         failed = true;
-        console.error(`Quota refresh failed for ${name}.`);
+        if (error.message === 'stale-auth') console.error(`Quota refresh failed for ${name}: login stale; re-import from a fresh Cockpit export.`);
+        else console.error(`Quota refresh failed for ${name}.`);
       }
     }
     if (failed) return 1;
@@ -180,7 +206,7 @@ export async function codexPool(args) {
     else console.log(JSON.stringify(selected));
   } else
     throw new Error(
-      'Usage: ccdt codex-pool list | import NAME current|AUTH_FILE | import-cockpit NAME DETAIL_FILE | remove NAME | refresh [NAME] | pick [--env]',
+      'Usage: ccdt codex-pool list | import NAME current|AUTH_FILE | import-cockpit NAME DETAIL_FILE | import-cockpit-export FILE | remove NAME | refresh [NAME] | pick [--env]',
     );
   return 0;
 }
