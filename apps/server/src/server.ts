@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID, createHash, timingSafeEqual } from 'node:crypto';
 import { createReadStream, realpathSync } from 'node:fs';
-import { cp, mkdtemp, open, readdir, rm, stat } from 'node:fs/promises';
+import { mkdtemp, open, readdir, rm, stat } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { promisify } from 'node:util';
@@ -69,7 +69,6 @@ import { UsageLog, createUsageReceiver, telemetryEnvironment } from './usage.ts'
 const runFile = promisify(execFile);
 
 type Peer = {
-  exports: Map<string, string>;
   socket: WebSocket;
   id: string;
   address: string;
@@ -158,6 +157,24 @@ export function createProxyServer(options: ServerOptions) {
   const usage = new UsageLog(store.database);
   const usageReceiver = options.claude ? createUsageReceiver(usage) : undefined;
   const peers = new Set<Peer>();
+  const exports = new Map<
+    string,
+    { directory: string; sessionId: string; timer: NodeJS.Timeout }
+  >();
+  function removeExport(token: string) {
+    const entry = exports.get(token);
+    if (!entry) return Promise.resolve();
+    exports.delete(token);
+    clearTimeout(entry.timer);
+    return rm(entry.directory, { recursive: true, force: true });
+  }
+  function refreshExport(token: string, directory: string, sessionId: string) {
+    const previous = exports.get(token);
+    if (previous) clearTimeout(previous.timer);
+    const timer = setTimeout(() => track(removeExport(token)), 10 * 60 * 1000);
+    timer.unref();
+    exports.set(token, { directory, sessionId, timer });
+  }
   // One run or terminal per session. Account changes and status reads wait until no run or terminal is active.
   const runs = new Map<string, Run>();
   const mutations = new Set<string>();
@@ -370,8 +387,6 @@ export function createProxyServer(options: ServerOptions) {
     target.socket = peer.socket;
     target.address = peer.address;
     peers.delete(peer);
-    for (const directory of peer.exports.values())
-      track(rm(directory, { recursive: true, force: true }));
     // Its close handler sees that it no longer belongs to the connection.
     previous.terminate();
     held.log.confirm(received);
@@ -849,22 +864,9 @@ export function createProxyServer(options: ServerOptions) {
         const nativeOptions = {
           dir: nativeDirectory(store.directory, nativeRoot(command.sessionId)),
         };
-        if (command.type === 'session.delete') {
-          try {
-            await cp(
-              await transcriptDirectory(command.sessionId),
-              join(store.directory, 'archive', command.sessionId),
-              {
-                recursive: true,
-                force: false,
-                errorOnExist: true,
-              },
-            );
-          } catch (error) {
-            console.error(`Transcript archive failed for ${command.sessionId}:`, error);
-          }
+        if (command.type === 'session.delete')
           await deleteSession(command.sessionId, nativeOptions);
-        } else await renameSession(command.sessionId, command.title, nativeOptions);
+        else await renameSession(command.sessionId, command.title, nativeOptions);
       }
       if (command.type === 'session.delete') {
         store.delete(command.sessionId);
@@ -1050,7 +1052,7 @@ export function createProxyServer(options: ServerOptions) {
   async function execute(
     peer: Peer,
     command: Command,
-  ): Promise<string | { archive: string; eof: boolean } | undefined> {
+  ): Promise<string | { archive: string; eof: boolean; exportToken: string } | undefined> {
     switch (command.type) {
       case 'account.status':
       case 'account.login':
@@ -1125,35 +1127,35 @@ export function createProxyServer(options: ServerOptions) {
     switch (command.type) {
       case 'session.export': {
         try {
-          let directory = peer.exports.get(command.sessionId);
-          if (command.offset === 0) {
-            if (directory) await rm(directory, { recursive: true, force: true });
+          let exportToken = command.exportToken;
+          let entry = exportToken ? exports.get(exportToken) : undefined;
+          if (command.offset === 0 && !exportToken) {
             const source = await transcriptDirectory(command.sessionId);
             await stat(source);
-            directory = await mkdtemp(join(tmpdir(), 'ccdt-export-'));
+            const directory = await mkdtemp(join(tmpdir(), 'ccdt-export-'));
             try {
               await runFile('tar', ['-cf', join(directory, 'session.tar'), '-C', source, '.']);
             } catch (error) {
               await rm(directory, { recursive: true, force: true });
               throw error;
             }
-            if (!peers.has(peer)) {
-              await rm(directory, { recursive: true, force: true });
-              throw new DomainError('not_found', '连接已断开。');
-            }
-            peer.exports.set(command.sessionId, directory);
+            exportToken = randomUUID();
+            refreshExport(exportToken, directory, command.sessionId);
+            entry = exports.get(exportToken);
           }
-          if (!directory) throw new DomainError('not_found', '导出已结束，请重新开始。');
+          if (!exportToken || !entry || entry.sessionId !== command.sessionId)
+            throw new DomainError('not_found', '导出已结束，请重新开始。');
+          const directory = entry.directory;
+          refreshExport(exportToken, directory, command.sessionId);
           const file = await open(join(directory, 'session.tar'), 'r');
           try {
             const buffer = Buffer.alloc(64 * 1024);
             const { bytesRead } = await file.read(buffer, 0, buffer.length, command.offset);
             const eof = bytesRead < buffer.length;
             if (eof) {
-              peer.exports.delete(command.sessionId);
-              await rm(directory, { recursive: true, force: true });
+              await removeExport(exportToken);
             }
-            return { archive: buffer.subarray(0, bytesRead).toString('base64'), eof };
+            return { archive: buffer.subarray(0, bytesRead).toString('base64'), eof, exportToken };
           } finally {
             await file.close();
           }
@@ -1438,8 +1440,6 @@ export function createProxyServer(options: ServerOptions) {
   // Whatever the connection owned ends with it; nothing is replayed for a later connection.
   function release(peer: Peer) {
     peers.delete(peer);
-    for (const directory of peer.exports.values())
-      track(rm(directory, { recursive: true, force: true }));
     peer.resume?.log.stop();
     if (login?.owner === peer) login.process.cancel();
     for (const current of terminals.values()) {
@@ -1474,7 +1474,6 @@ export function createProxyServer(options: ServerOptions) {
       registering: false,
       subscriptions: new Set(),
       responses: new Map(),
-      exports: new Map(),
     };
     peers.add(peer);
     const authTimer = setTimeout(() => socket.close(4001, 'Authentication timeout'), 5000);
@@ -1606,6 +1605,7 @@ export function createProxyServer(options: ServerOptions) {
       const cleanup = [...peers].map((peer) => peer.tunnel?.close());
       for (const peer of peers) peer.socket.terminate();
       await Promise.all([...tasks]);
+      await Promise.all([...exports.keys()].map(removeExport));
       await terminalCleanup;
       await Promise.all([...tunnelTasks]);
       await Promise.all(cleanup);

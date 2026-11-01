@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import { PROTOCOL_VERSION } from '@cc-desk-tunnel/protocol';
 import { openConnection } from '../src/connection.mjs';
@@ -188,10 +190,11 @@ test('export reads bounded archive chunks and detects old responses', async () =
   const offsets = [];
   await readTranscript(
     {
-      request: async ({ offset }) => {
+      request: async ({ offset, exportToken }) => {
+        assert.equal(exportToken, offset ? SESSION : undefined);
         offsets.push(offset);
         return offset === 0
-          ? { archive: Buffer.from('abc').toString('base64'), eof: false }
+          ? { archive: Buffer.from('abc').toString('base64'), eof: false, exportToken: SESSION }
           : { archive: Buffer.from('def').toString('base64'), eof: true };
       },
     },
@@ -208,4 +211,14 @@ test('export reads bounded archive chunks and detects old responses', async () =
     ),
     /版本过旧/,
   );
+});
+
+test('export reports an invalid session ID as missing', () => {
+  const result = spawnSync(
+    process.execPath,
+    [fileURLToPath(new URL('../bin/ccdt.mjs', import.meta.url)), 'export', 'does-not-exist'],
+    { encoding: 'utf8' },
+  );
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /会话不存在/);
 });

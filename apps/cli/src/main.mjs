@@ -600,8 +600,15 @@ async function list(directory, values) {
 
 export async function readTranscript(connection, sessionId, write) {
   let offset = 0;
+  let exportToken;
   for (;;) {
-    const response = await connection.request({ type: 'session.export', sessionId, offset });
+    const response = await connection.request({
+      type: 'session.export',
+      sessionId,
+      offset,
+      ...(exportToken && { exportToken }),
+    });
+    exportToken = response.exportToken;
     if (response.archive === undefined)
       throw new Error('服务端版本过旧，不支持导出对话记录，请升级服务端。');
     if (typeof response.archive !== 'string' || typeof response.eof !== 'boolean')
@@ -615,6 +622,8 @@ export async function readTranscript(connection, sessionId, write) {
 }
 
 async function exportSession(sessionId, out) {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(sessionId))
+    throw new Error('会话不存在。');
   if (!(await daemonRunning()))
     throw new Error('ccdt export 需要后台服务；请先运行 ccdt daemon install。');
   const connection = await openConnection(`ws+unix://${daemonSocket()}:/`, null);

@@ -391,6 +391,7 @@ export const commandSchema = z.discriminatedUnion('type', [
       type: z.literal('session.export'),
       ...request,
       sessionId: id,
+      exportToken: id.optional(),
       offset: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
     })
     .strict(),
@@ -589,6 +590,7 @@ export const serverMessageSchema = z.discriminatedUnion('type', [
     ok: z.boolean(),
     sessionId: id.optional(),
     archive: z.string().optional(),
+    exportToken: id.optional(),
     eof: z.boolean().optional(),
     code: z.string().optional(),
     message: z.string().optional(),
