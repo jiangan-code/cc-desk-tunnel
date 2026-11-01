@@ -87,7 +87,7 @@ export function openConnection(url, token, { timeoutMs = 60000 } = {}) {
           for (const [id, request] of pending) {
             if (request.command.type === 'session.export') {
               pending.delete(id);
-              request.reject(new Error('服务端版本过旧，不支持导出对话记录，请升级服务端。'));
+              request.reject(new Error(message.message));
               continue;
             }
             if (request.command.type !== 'terminal.open' || request.command.profile === undefined)
@@ -108,13 +108,11 @@ export function openConnection(url, token, { timeoutMs = 60000 } = {}) {
         else
           request.reject(
             new Error(
-              message.code === 'invalid_command' && request.command.type === 'session.export'
-                ? '服务端版本过旧，不支持导出对话记录，请升级服务端。'
-                : message.code === 'invalid_command' &&
-                    request.command.type === 'terminal.open' &&
-                    request.command.profile !== undefined
-                  ? '服务端不支持选择账号，请升级并重新部署服务端。'
-                  : (message.message ?? message.code ?? '请求失败。'),
+              message.code === 'invalid_command' &&
+                request.command.type === 'terminal.open' &&
+                request.command.profile !== undefined
+                ? '服务端不支持选择账号，请升级并重新部署服务端。'
+                : (message.message ?? message.code ?? '请求失败。'),
             ),
           );
         return;

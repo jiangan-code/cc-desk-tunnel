@@ -588,7 +588,7 @@ export const serverMessageSchema = z.discriminatedUnion('type', [
     requestId: id,
     ok: z.boolean(),
     sessionId: id.optional(),
-    transcript: z.string().optional(),
+    archive: z.string().optional(),
     eof: z.boolean().optional(),
     code: z.string().optional(),
     message: z.string().optional(),

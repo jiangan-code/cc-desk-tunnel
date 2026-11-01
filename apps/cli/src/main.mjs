@@ -1,5 +1,6 @@
 import { codexPool } from './codex-pool.mjs';
-import { realpath, stat, writeFile } from 'node:fs/promises';
+import { open, realpath, stat } from 'node:fs/promises';
+import { once } from 'node:events';
 import { basename, resolve } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { parseArgs } from 'node:util';
@@ -33,7 +34,7 @@ const USAGE = `用法：
   ccdt codex-pool        Manage local Codex account homes and quota
   ccdt accounts          列出服务端账号和登录状态；--json 输出 JSON，旧服务端退出码为 3
   ccdt account-token set|clear <账号>  保存或清除账号的 OAuth 令牌（set 从标准输入读取）
-  ccdt export <会话 ID> [--out <文件>]  导出原生对话记录
+  ccdt export <会话 ID> [--out <文件>]  导出原生对话记录为 tar 文件
   ccdt rm <会话 ID>…     删除已停止的 agent 和它的对话（需要后台服务）
   ccdt daemon install    装成 systemd 用户服务：关掉终端 agent 也继续运行
   ccdt daemon status | stop | uninstall
@@ -597,17 +598,18 @@ async function list(directory, values) {
   }
 }
 
-export async function readTranscript(connection, sessionId) {
-  const chunks = [];
+export async function readTranscript(connection, sessionId, write) {
   let offset = 0;
   for (;;) {
     const response = await connection.request({ type: 'session.export', sessionId, offset });
-    if (typeof response.transcript !== 'string' || typeof response.eof !== 'boolean')
+    if (response.archive === undefined)
       throw new Error('服务端版本过旧，不支持导出对话记录，请升级服务端。');
-    const chunk = Buffer.from(response.transcript, 'base64');
-    chunks.push(chunk);
+    if (typeof response.archive !== 'string' || typeof response.eof !== 'boolean')
+      throw new Error('服务端返回了无效的对话记录。');
+    const chunk = Buffer.from(response.archive, 'base64');
+    await write(chunk);
     offset += chunk.length;
-    if (response.eof) return Buffer.concat(chunks);
+    if (response.eof) return;
     if (!chunk.length) throw new Error('服务端返回了无效的对话记录。');
   }
 }
@@ -617,9 +619,15 @@ async function exportSession(sessionId, out) {
     throw new Error('ccdt export 需要后台服务；请先运行 ccdt daemon install。');
   const connection = await openConnection(`ws+unix://${daemonSocket()}:/`, null);
   try {
-    const transcript = await readTranscript(connection, sessionId);
-    if (out !== undefined) await writeFile(out, transcript, { mode: 0o600 });
-    else process.stdout.write(transcript);
+    const file = out !== undefined ? await open(out, 'w', 0o600) : null;
+    try {
+      await readTranscript(connection, sessionId, async (chunk) => {
+        if (file) await file.writeFile(chunk);
+        else if (!process.stdout.write(chunk)) await once(process.stdout, 'drain');
+      });
+    } finally {
+      await file?.close();
+    }
     return 0;
   } finally {
     connection.close();

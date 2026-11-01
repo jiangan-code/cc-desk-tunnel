@@ -1,6 +1,9 @@
 import { randomBytes, randomUUID, createHash, timingSafeEqual } from 'node:crypto';
 import { createReadStream, realpathSync } from 'node:fs';
-import { copyFile, mkdir, open } from 'node:fs/promises';
+import { cp, mkdtemp, open, readdir, rm, stat } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { promisify } from 'node:util';
 import { rememberTerminalIdentity, terminalIdentity } from './terminal-identity.ts';
 import { createServer } from 'node:http';
 import { join, resolve } from 'node:path';
@@ -63,7 +66,10 @@ import { ServiceUpdates, serviceVersion } from './updates.ts';
 import type { UpdateOptions } from './updates.ts';
 import { UsageLog, createUsageReceiver, telemetryEnvironment } from './usage.ts';
 
+const runFile = promisify(execFile);
+
 type Peer = {
+  exports: Map<string, string>;
   socket: WebSocket;
   id: string;
   address: string;
@@ -364,6 +370,8 @@ export function createProxyServer(options: ServerOptions) {
     target.socket = peer.socket;
     target.address = peer.address;
     peers.delete(peer);
+    for (const directory of peer.exports.values())
+      track(rm(directory, { recursive: true, force: true }));
     // Its close handler sees that it no longer belongs to the connection.
     previous.terminate();
     held.log.confirm(received);
@@ -814,17 +822,20 @@ export function createProxyServer(options: ServerOptions) {
       throw new DomainError('terminal_failed', '原生终端启动失败，请检查 Linux PTY 组件与 CLI。');
     }
   }
-  function transcriptPath(sessionId: string) {
+  async function transcriptDirectory(sessionId: string) {
     let dir = resolve(nativeDirectory(store.directory, nativeRoot(sessionId)));
     try {
       dir = realpathSync(dir);
     } catch {}
     const encoded = dir.replace(/[^a-zA-Z0-9]/g, '-');
-    let hash = 0;
-    for (let i = 0; i < dir.length; i++) hash = ((hash << 5) - hash + dir.charCodeAt(i)) | 0;
-    const project =
-      encoded.length <= 200 ? encoded : `${encoded.slice(0, 200)}-${Math.abs(hash).toString(36)}`;
-    return join(profiles.defaultDirectory, 'projects', project, `${sessionId}.jsonl`);
+    const projects = join(profiles.defaultDirectory, 'projects');
+    if (encoded.length <= 200) return join(projects, encoded);
+    const matches = (await readdir(projects)).filter((name) =>
+      name.startsWith(encoded.slice(0, 200)),
+    );
+    if (matches.length !== 1)
+      throw new DomainError('not_found', '无法唯一确定会话的原生对话记录目录。');
+    return join(projects, matches[0]);
   }
   // Rename and delete change the native session first; the proxy record follows only when that succeeded.
   async function manageSession(
@@ -840,11 +851,14 @@ export function createProxyServer(options: ServerOptions) {
         };
         if (command.type === 'session.delete') {
           try {
-            const archive = join(store.directory, 'archive', command.sessionId);
-            await mkdir(archive, { recursive: true, mode: 0o700 });
-            await copyFile(
-              transcriptPath(command.sessionId),
-              join(archive, `${command.sessionId}.jsonl`),
+            await cp(
+              await transcriptDirectory(command.sessionId),
+              join(store.directory, 'archive', command.sessionId),
+              {
+                recursive: true,
+                force: false,
+                errorOnExist: true,
+              },
             );
           } catch (error) {
             console.error(`Transcript archive failed for ${command.sessionId}:`, error);
@@ -1036,7 +1050,7 @@ export function createProxyServer(options: ServerOptions) {
   async function execute(
     peer: Peer,
     command: Command,
-  ): Promise<string | { transcript: string; eof: boolean } | undefined> {
+  ): Promise<string | { archive: string; eof: boolean } | undefined> {
     switch (command.type) {
       case 'account.status':
       case 'account.login':
@@ -1111,14 +1125,35 @@ export function createProxyServer(options: ServerOptions) {
     switch (command.type) {
       case 'session.export': {
         try {
-          const file = await open(transcriptPath(command.sessionId), 'r');
+          let directory = peer.exports.get(command.sessionId);
+          if (command.offset === 0) {
+            if (directory) await rm(directory, { recursive: true, force: true });
+            const source = await transcriptDirectory(command.sessionId);
+            await stat(source);
+            directory = await mkdtemp(join(tmpdir(), 'ccdt-export-'));
+            try {
+              await runFile('tar', ['-cf', join(directory, 'session.tar'), '-C', source, '.']);
+            } catch (error) {
+              await rm(directory, { recursive: true, force: true });
+              throw error;
+            }
+            if (!peers.has(peer)) {
+              await rm(directory, { recursive: true, force: true });
+              throw new DomainError('not_found', '连接已断开。');
+            }
+            peer.exports.set(command.sessionId, directory);
+          }
+          if (!directory) throw new DomainError('not_found', '导出已结束，请重新开始。');
+          const file = await open(join(directory, 'session.tar'), 'r');
           try {
             const buffer = Buffer.alloc(64 * 1024);
             const { bytesRead } = await file.read(buffer, 0, buffer.length, command.offset);
-            return {
-              transcript: buffer.subarray(0, bytesRead).toString('base64'),
-              eof: bytesRead < buffer.length,
-            };
+            const eof = bytesRead < buffer.length;
+            if (eof) {
+              peer.exports.delete(command.sessionId);
+              await rm(directory, { recursive: true, force: true });
+            }
+            return { archive: buffer.subarray(0, bytesRead).toString('base64'), eof };
           } finally {
             await file.close();
           }
@@ -1403,6 +1438,8 @@ export function createProxyServer(options: ServerOptions) {
   // Whatever the connection owned ends with it; nothing is replayed for a later connection.
   function release(peer: Peer) {
     peers.delete(peer);
+    for (const directory of peer.exports.values())
+      track(rm(directory, { recursive: true, force: true }));
     peer.resume?.log.stop();
     if (login?.owner === peer) login.process.cancel();
     for (const current of terminals.values()) {
@@ -1437,6 +1474,7 @@ export function createProxyServer(options: ServerOptions) {
       registering: false,
       subscriptions: new Set(),
       responses: new Map(),
+      exports: new Map(),
     };
     peers.add(peer);
     const authTimer = setTimeout(() => socket.close(4001, 'Authentication timeout'), 5000);

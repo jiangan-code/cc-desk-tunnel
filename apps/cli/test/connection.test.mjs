@@ -132,7 +132,7 @@ test('old services rejecting account selection fail promptly without retrying as
   }
 });
 
-test('export fails promptly when an old server rejects the command', async () => {
+test('export surfaces a server command error promptly', async () => {
   const fake = await service((socket, message) => {
     if (message.type === 'auth') socket.send(JSON.stringify(ready));
     else
@@ -144,11 +144,68 @@ test('export fails promptly when an old server rejects the command', async () =>
     const connection = await openConnection(fake.url, 't'.repeat(30));
     await assert.rejects(
       connection.request({ type: 'session.export', sessionId: SESSION, offset: 0 }),
-      /版本过旧/,
+      /invalid/,
     );
     connection.close();
     await connection.closed;
   } finally {
     fake.close();
   }
+});
+
+test('export preserves response errors including not found and invalid command', async () => {
+  for (const code of ['not_found', 'invalid_command']) {
+    const fake = await service((socket, message) => {
+      if (message.type === 'auth') socket.send(JSON.stringify(ready));
+      else
+        socket.send(
+          JSON.stringify({
+            type: 'response',
+            requestId: message.requestId,
+            ok: false,
+            code,
+            message: `server: ${code}`,
+          }),
+        );
+    });
+    try {
+      const connection = await openConnection(fake.url, 't'.repeat(30));
+      await assert.rejects(
+        connection.request({ type: 'session.export', sessionId: SESSION, offset: 0 }),
+        new RegExp(`server: ${code}`),
+      );
+      connection.close();
+      await connection.closed;
+    } finally {
+      fake.close();
+    }
+  }
+});
+
+test('export reads bounded archive chunks and detects old responses', async () => {
+  const { readTranscript } = await import('../src/main.mjs');
+  const chunks = [];
+  const offsets = [];
+  await readTranscript(
+    {
+      request: async ({ offset }) => {
+        offsets.push(offset);
+        return offset === 0
+          ? { archive: Buffer.from('abc').toString('base64'), eof: false }
+          : { archive: Buffer.from('def').toString('base64'), eof: true };
+      },
+    },
+    SESSION,
+    async (chunk) => chunks.push(chunk),
+  );
+  assert.deepEqual(offsets, [0, 3]);
+  assert.equal(Buffer.concat(chunks).toString(), 'abcdef');
+  await assert.rejects(
+    readTranscript(
+      { request: async () => ({ transcript: '', eof: true }) },
+      SESSION,
+      async () => {},
+    ),
+    /版本过旧/,
+  );
 });
