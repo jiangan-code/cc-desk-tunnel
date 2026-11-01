@@ -388,6 +388,14 @@ export const commandSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('session.delete'), ...request, sessionId: id }).strict(),
   z
     .object({
+      type: z.literal('session.export'),
+      ...request,
+      sessionId: id,
+      offset: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    })
+    .strict(),
+  z
+    .object({
       type: z.literal('session.rename'),
       ...request,
       sessionId: id,
@@ -580,6 +588,8 @@ export const serverMessageSchema = z.discriminatedUnion('type', [
     requestId: id,
     ok: z.boolean(),
     sessionId: id.optional(),
+    transcript: z.string().optional(),
+    eof: z.boolean().optional(),
     code: z.string().optional(),
     message: z.string().optional(),
   }),

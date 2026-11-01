@@ -131,3 +131,24 @@ test('old services rejecting account selection fail promptly without retrying as
     }
   }
 });
+
+test('export fails promptly when an old server rejects the command', async () => {
+  const fake = await service((socket, message) => {
+    if (message.type === 'auth') socket.send(JSON.stringify(ready));
+    else
+      socket.send(
+        JSON.stringify({ type: 'connection.error', code: 'invalid_command', message: 'invalid' }),
+      );
+  });
+  try {
+    const connection = await openConnection(fake.url, 't'.repeat(30));
+    await assert.rejects(
+      connection.request({ type: 'session.export', sessionId: SESSION, offset: 0 }),
+      /版本过旧/,
+    );
+    connection.close();
+    await connection.closed;
+  } finally {
+    fake.close();
+  }
+});

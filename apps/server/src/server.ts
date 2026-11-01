@@ -1,8 +1,9 @@
 import { randomBytes, randomUUID, createHash, timingSafeEqual } from 'node:crypto';
-import { createReadStream } from 'node:fs';
+import { createReadStream, realpathSync } from 'node:fs';
+import { copyFile, mkdir, open } from 'node:fs/promises';
 import { rememberTerminalIdentity, terminalIdentity } from './terminal-identity.ts';
 import { createServer } from 'node:http';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import type { IncomingMessage, RequestListener } from 'node:http';
 import { createServer as createHttpsServer } from 'node:https';
 import { WebSocket, WebSocketServer } from 'ws';
@@ -813,6 +814,18 @@ export function createProxyServer(options: ServerOptions) {
       throw new DomainError('terminal_failed', '原生终端启动失败，请检查 Linux PTY 组件与 CLI。');
     }
   }
+  function transcriptPath(sessionId: string) {
+    let dir = resolve(nativeDirectory(store.directory, nativeRoot(sessionId)));
+    try {
+      dir = realpathSync(dir);
+    } catch {}
+    const encoded = dir.replace(/[^a-zA-Z0-9]/g, '-');
+    let hash = 0;
+    for (let i = 0; i < dir.length; i++) hash = ((hash << 5) - hash + dir.charCodeAt(i)) | 0;
+    const project =
+      encoded.length <= 200 ? encoded : `${encoded.slice(0, 200)}-${Math.abs(hash).toString(36)}`;
+    return join(profiles.defaultDirectory, 'projects', project, `${sessionId}.jsonl`);
+  }
   // Rename and delete change the native session first; the proxy record follows only when that succeeded.
   async function manageSession(
     command: CommandOf<'session.delete' | 'session.rename'>,
@@ -825,9 +838,19 @@ export function createProxyServer(options: ServerOptions) {
         const nativeOptions = {
           dir: nativeDirectory(store.directory, nativeRoot(command.sessionId)),
         };
-        if (command.type === 'session.delete')
+        if (command.type === 'session.delete') {
+          try {
+            const archive = join(store.directory, 'archive', command.sessionId);
+            await mkdir(archive, { recursive: true, mode: 0o700 });
+            await copyFile(
+              transcriptPath(command.sessionId),
+              join(archive, `${command.sessionId}.jsonl`),
+            );
+          } catch (error) {
+            console.error(`Transcript archive failed for ${command.sessionId}:`, error);
+          }
           await deleteSession(command.sessionId, nativeOptions);
-        else await renameSession(command.sessionId, command.title, nativeOptions);
+        } else await renameSession(command.sessionId, command.title, nativeOptions);
       }
       if (command.type === 'session.delete') {
         store.delete(command.sessionId);
@@ -1010,7 +1033,10 @@ export function createProxyServer(options: ServerOptions) {
   }
 
   // Resolves to the session ID carried in the response frame; account and usage commands have none.
-  async function execute(peer: Peer, command: Command): Promise<string | undefined> {
+  async function execute(
+    peer: Peer,
+    command: Command,
+  ): Promise<string | { transcript: string; eof: boolean } | undefined> {
     switch (command.type) {
       case 'account.status':
       case 'account.login':
@@ -1083,6 +1109,25 @@ export function createProxyServer(options: ServerOptions) {
     if (mutations.has(command.sessionId))
       throw new DomainError('session_busy', '会话正在更新，请稍后重试。');
     switch (command.type) {
+      case 'session.export': {
+        try {
+          const file = await open(transcriptPath(command.sessionId), 'r');
+          try {
+            const buffer = Buffer.alloc(64 * 1024);
+            const { bytesRead } = await file.read(buffer, 0, buffer.length, command.offset);
+            return {
+              transcript: buffer.subarray(0, bytesRead).toString('base64'),
+              eof: bytesRead < buffer.length,
+            };
+          } finally {
+            await file.close();
+          }
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT')
+            throw new DomainError('not_found', '会话的原生对话记录不存在。');
+          throw error;
+        }
+      }
       case 'session.status':
         await readStatus(peer, command);
         return command.sessionId;
@@ -1342,7 +1387,7 @@ export function createProxyServer(options: ServerOptions) {
         type: 'response',
         requestId: command.requestId,
         ok: true,
-        sessionId,
+        ...(typeof sessionId === 'object' ? sessionId : { sessionId }),
       }),
       (error): ServerMessage => ({
         type: 'response',

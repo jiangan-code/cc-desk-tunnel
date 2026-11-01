@@ -1,5 +1,5 @@
 import { codexPool } from './codex-pool.mjs';
-import { realpath, stat } from 'node:fs/promises';
+import { realpath, stat, writeFile } from 'node:fs/promises';
 import { basename, resolve } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { parseArgs } from 'node:util';
@@ -33,6 +33,7 @@ const USAGE = `用法：
   ccdt codex-pool        Manage local Codex account homes and quota
   ccdt accounts          列出服务端账号和登录状态；--json 输出 JSON，旧服务端退出码为 3
   ccdt account-token set|clear <账号>  保存或清除账号的 OAuth 令牌（set 从标准输入读取）
+  ccdt export <会话 ID> [--out <文件>]  导出原生对话记录
   ccdt rm <会话 ID>…     删除已停止的 agent 和它的对话（需要后台服务）
   ccdt daemon install    装成 systemd 用户服务：关掉终端 agent 也继续运行
   ccdt daemon status | stop | uninstall
@@ -86,6 +87,7 @@ export async function main(argv) {
         account: { type: 'string' },
         single: { type: 'boolean' },
         json: { type: 'boolean' },
+        out: { type: 'string' },
         url: { type: 'string' },
         fingerprint: { type: 'string' },
         'token-stdin': { type: 'boolean' },
@@ -127,6 +129,10 @@ export async function main(argv) {
     if (positionals[0] === 'ls') {
       if (positionals.length > 2) throw new UsageError('只能指定一个目录。');
       return await list(positionals[1], values);
+    }
+    if (positionals[0] === 'export') {
+      if (positionals.length !== 2) throw new UsageError('请指定一个会话 ID。');
+      return await exportSession(positionals[1], values.out);
     }
     if (positionals[0] === 'rm') {
       if (positionals.length < 2) throw new UsageError('请给出要删除的会话 ID（见 ccdt ls）。');
@@ -585,6 +591,35 @@ async function list(directory, values) {
     else
       for (const agent of agents)
         console.log([agent.status, agent.title, agent.projectPath, agent.id].join('\t'));
+    return 0;
+  } finally {
+    connection.close();
+  }
+}
+
+export async function readTranscript(connection, sessionId) {
+  const chunks = [];
+  let offset = 0;
+  for (;;) {
+    const response = await connection.request({ type: 'session.export', sessionId, offset });
+    if (typeof response.transcript !== 'string' || typeof response.eof !== 'boolean')
+      throw new Error('服务端版本过旧，不支持导出对话记录，请升级服务端。');
+    const chunk = Buffer.from(response.transcript, 'base64');
+    chunks.push(chunk);
+    offset += chunk.length;
+    if (response.eof) return Buffer.concat(chunks);
+    if (!chunk.length) throw new Error('服务端返回了无效的对话记录。');
+  }
+}
+
+async function exportSession(sessionId, out) {
+  if (!(await daemonRunning()))
+    throw new Error('ccdt export 需要后台服务；请先运行 ccdt daemon install。');
+  const connection = await openConnection(`ws+unix://${daemonSocket()}:/`, null);
+  try {
+    const transcript = await readTranscript(connection, sessionId);
+    if (out !== undefined) await writeFile(out, transcript, { mode: 0o600 });
+    else process.stdout.write(transcript);
     return 0;
   } finally {
     connection.close();

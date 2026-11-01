@@ -920,3 +920,76 @@ test('the newest client installer is announced on sign-in and downloads only wit
   assert.equal(download.status, 200);
   assert.equal(await download.text(), 'installer bytes');
 });
+
+test('exports native transcripts including forks and archives before deletion', async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'ccdt-export-'));
+  const previous = process.env.CLAUDE_CONFIG_DIR;
+  process.env.CLAUDE_CONFIG_DIR = join(directory, 'claude');
+  const dataDir = join(directory, 'data');
+  const server = createProxyServer({
+    token,
+    dataDir,
+    reverseProxy: true,
+    claude: { executable: '/bin/false' },
+    accountsDir: join(directory, 'accounts'),
+    tunnel: {
+      executable: '',
+      publicHost: '',
+      port: 1,
+      certificatePath: '',
+      keyPath: '',
+      serverName: '',
+    },
+  });
+  const url = await server.listen(0);
+  const client = new Client(url);
+  t.after(async () => {
+    client.socket.terminate();
+    await server.close();
+    if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = previous;
+    rmSync(directory, { recursive: true, force: true });
+  });
+  await client.open();
+  const source = server.store.create(randomUUID(), 'source', 'D:\\test');
+  server.store.append(source.id, randomUUID(), {
+    type: 'native.session',
+    nativeSessionId: source.id,
+    model: 'test',
+    version: '1',
+  });
+  const fork = server.store.fork(randomUUID(), source.id, randomUUID(), 'fork', true);
+  const nativeDir = join(dataDir, 'native', source.id);
+  const project = nativeDir.replace(/[^a-zA-Z0-9]/g, '-');
+  const projectDir = join(process.env.CLAUDE_CONFIG_DIR, 'projects', project);
+  mkdirSync(projectDir, { recursive: true });
+  const bytes = Buffer.concat([
+    Buffer.from('{"text":"你好"}\n'),
+    Buffer.alloc(70000, 65),
+    Buffer.from('\n'),
+  ]);
+  for (const id of [source.id, fork.id]) writeFileSync(join(projectDir, `${id}.jsonl`), bytes);
+  for (const id of [source.id, fork.id]) {
+    const first = await client.request({ type: 'session.export', sessionId: id, offset: 0 });
+    const second = await client.request({ type: 'session.export', sessionId: id, offset: 65536 });
+    assert.ok(first.type === 'response' && first.ok && first.transcript && first.eof === false);
+    assert.ok(second.type === 'response' && second.ok && second.transcript && second.eof === true);
+    assert.deepEqual(
+      Buffer.concat([
+        Buffer.from(first.transcript, 'base64'),
+        Buffer.from(second.transcript, 'base64'),
+      ]),
+      bytes,
+    );
+  }
+  const missing = await client.request({
+    type: 'session.export',
+    sessionId: randomUUID(),
+    offset: 0,
+  });
+  assert.ok(missing.type === 'response' && !missing.ok && missing.code === 'not_found');
+  const deleted = await client.request({ type: 'session.delete', sessionId: fork.id });
+  assert.ok(deleted.type === 'response' && deleted.ok);
+  assert.deepEqual(readFileSync(join(dataDir, 'archive', fork.id, `${fork.id}.jsonl`)), bytes);
+  assert.throws(() => readFileSync(join(projectDir, `${fork.id}.jsonl`)));
+});
