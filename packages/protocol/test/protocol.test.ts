@@ -134,3 +134,28 @@ test('resume logs bound UTF-8 bytes on both peers and refuse replay across evict
   log.confirm(log.sent);
   assert.deepEqual(log.since(log.sent), []);
 });
+
+test('account tokens extend the protocol without changing its version', () => {
+  const requestId = randomUUID();
+  assert.equal(PROTOCOL_VERSION, 12);
+  assert.ok(
+    commandSchema.safeParse({
+      type: 'account.token.set',
+      requestId,
+      profile: 'work',
+      token: 'sk-ant-oat01-testtoken123',
+    }).success,
+  );
+  assert.ok(
+    commandSchema.safeParse({ type: 'account.token.clear', requestId, profile: 'work' }).success,
+  );
+  assert.equal(
+    commandSchema.safeParse({
+      type: 'account.token.set',
+      requestId,
+      profile: 'work',
+      token: 'sessionKey',
+    }).success,
+    false,
+  );
+});

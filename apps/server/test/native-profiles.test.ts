@@ -7,6 +7,7 @@ import {
   readFileSync,
   readlinkSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -28,7 +29,7 @@ test('further accounts get their own CLI directory and share the conversations o
 
   assert.deepEqual(profiles.list(), ['default']);
   assert.equal(profiles.active, 'default');
-  assert.deepEqual(profiles.environment('default'), {});
+  assert.deepEqual(profiles.environment('default'), { CLAUDE_CODE_OAUTH_TOKEN: '' });
 
   profiles.add('work');
   const directory = join(base, 'accounts', 'work');
@@ -36,7 +37,17 @@ test('further accounts get their own CLI directory and share the conversations o
   assert.equal(readFileSync(join(directory, 'settings.json'), 'utf8'), '{"theme":"dark"}\n');
   assert.equal(readlinkSync(join(directory, 'skills')), join(defaults, 'skills'));
   assert.equal(existsSync(join(directory, 'agents')), false);
-  assert.deepEqual(profiles.environment('work'), { CLAUDE_CONFIG_DIR: directory });
+  assert.deepEqual(profiles.environment('work'), {
+    CLAUDE_CONFIG_DIR: directory,
+    CLAUDE_CODE_OAUTH_TOKEN: '',
+  });
+  profiles.setToken('work', 'sk-ant-oat01-testtoken123');
+  assert.equal(profiles.environment('work').CLAUDE_CODE_OAUTH_TOKEN, 'sk-ant-oat01-testtoken123');
+  assert.equal(profiles.environment('default').CLAUDE_CODE_OAUTH_TOKEN, '');
+  assert.equal(statSync(join(base, 'account-tokens')).mode & 0o777, 0o700);
+  assert.equal(statSync(join(base, 'account-tokens', 'work')).mode & 0o777, 0o600);
+  profiles.setToken('work');
+  assert.equal(profiles.environment('work').CLAUDE_CODE_OAUTH_TOKEN, '');
   assert.throws(() => profiles.add('work'));
   assert.throws(() => profiles.add('default'));
   assert.throws(() => profiles.add('../x'));

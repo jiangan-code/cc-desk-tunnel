@@ -2,7 +2,7 @@
 
 服务端可以登录多个 Claude 账号，并选定其中一个作为“当前账号”：之后新开的 agent 和图形界面的运行都用它，已经在运行的不受影响。对话记录各账号共用，所以一个账号的额度用完时，换到另一个账号后可以接着同一段对话。
 
-做法是 Claude Code 官方支持的 `CLAUDE_CONFIG_DIR`（见 [Authentication](https://code.claude.com/docs/en/authentication)）：每个账号一个独立的 CLI 配置目录，登录凭据、设置和 CLI 状态各自保存。服务端不读取也不复制凭据，登录和退出都走官方的 `claude auth`。
+做法是 Claude Code 官方支持的 `CLAUDE_CONFIG_DIR`（见 [Authentication](https://code.claude.com/docs/en/authentication)）：每个账号一个独立的 CLI 配置目录，登录凭据、设置和 CLI 状态各自保存。普通账号的登录和退出走官方的 `claude auth`；也可以按账号保存 `claude setup-token` 令牌。
 
 条款同样由你自己确认，见首页的[账号须知](../README.md#账号须知)。
 
@@ -15,6 +15,7 @@
 | `~/.claude-accounts/<名字>/projects` | 软链接到 `~/.claude/projects`，所以对话是共用的 |
 | `~/.claude-accounts/<名字>/skills` 等 | 新建时默认账号已有的 `skills`、`agents`、`commands`、`CLAUDE.md` 也软链接过去，各账号共用 |
 | `<数据目录>/state/account.json` | 当前账号的名字 |
+| `<数据目录>/state/account-tokens/<名字>` | 该账号的 OAuth 令牌，目录权限 0700，文件权限 0600 |
 
 容器里 `HOME=/data/home`，这些目录都在数据目录内：重建容器不会丢失，`deploy/manage.sh backup` 也会一起备份。
 
@@ -41,6 +42,21 @@
 **换号接着对话：** 在账号列表里切到另一个账号，回到列表，选中原来的 agent 按 `d` 结束它（对话保留），再按 `Enter` 进入。它会以新账号启动，并用 `--continue` 接着刚才那段对话。
 
 运行中的 agent 如果用的不是当前账号，列表里会在名字后面标出 `@账号名`。
+
+## 使用 setup-token
+
+先在有 Claude Code 的环境中运行 `claude setup-token`，按提示完成授权，取得 `sk-ant-oat01-` 开头的令牌。先在账号列表中创建目标账号，例如 `work`，再在运行 ccdt 的机器上执行：
+
+```bash
+ccdt account-token set work    # 隐藏输入，粘贴令牌后回车
+# 或通过标准输入传入：命令 | ccdt account-token set work
+ccdt accounts --json           # token 为 true 表示已保存；不会输出令牌
+ccdt account-token clear work  # 清除令牌
+```
+
+切换账号仍在列表中按 `a` 选择，或启动时使用 `--account work`。设置或清除前要先结束使用该账号的运行和终端。已保存令牌的账号要使用普通登录时，先清除令牌；账号页的退出登录也会清除当前账号的令牌，并执行普通退出。服务进程自身继承的 `CLAUDE_CODE_OAUTH_TOKEN` 不会用于任何账号：每个进程只使用该账号保存的令牌，无令牌时覆盖为空。令牌不是 claude.ai 的 `sessionKey`，后者不受支持。
+
+**服务端部分需要重新部署后生效。**新客户端连接旧服务端时会提示升级，旧客户端仍可使用已有账号功能。不要把令牌放进命令参数、截图或聊天中。
 
 ## 为单个会话选择账号
 
@@ -102,4 +118,4 @@ ln -s ~/.claude/skills ~/.claude-accounts/work/skills  # 可选：共用 skills
 | 协议：`account.use` / `account.add`，`account.state` 的 `profile` / `profiles`，`terminal.open` 可选的 `profile` 和终端状态的 `profile` | `packages/protocol/src/index.ts` |
 | ccdt 账号列表、`--account` 和 `accounts` | `apps/cli/src/deck.mjs`、`apps/cli/src/main.mjs` |
 
-协议只做了增量扩展，没有升协议版本：旧客户端照常连接，看到的是当前账号；新 ccdt 连旧服务端时，按 `a` 会提示服务端不支持多账号。服务端发给 CLI 进程的环境只多一个 `CLAUDE_CONFIG_DIR`；服务端自己用 Agent SDK 查找、续接、改名、删除对话时读的是默认目录的 `projects`，所以其他账号目录里必须是指向它的软链接。
+协议只做了增量扩展，没有升协议版本：旧客户端照常连接，看到的是当前账号；新 ccdt 连旧服务端时，按 `a` 会提示服务端不支持多账号。服务端发给 CLI 进程的环境包含对应账号的 `CLAUDE_CONFIG_DIR` 和 OAuth 令牌；服务端自己用 Agent SDK 查找、续接、改名、删除对话时读的是默认目录的 `projects`，所以其他账号目录里必须是指向它的软链接。

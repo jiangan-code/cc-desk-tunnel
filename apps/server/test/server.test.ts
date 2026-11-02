@@ -655,7 +655,7 @@ if [ "$1" = auth ]; then
     login) echo 'https://example.invalid/login '; read -r code; exit 0 ;;
   esac
 fi
-printf 'account=%s\\n' "$CLAUDE_CONFIG_DIR"
+printf 'account=%s token=%s\\n' "$CLAUDE_CONFIG_DIR" "\${CLAUDE_CODE_OAUTH_TOKEN:+present}"
 while read -r line; do :; done
 `,
   );
@@ -725,6 +725,21 @@ while read -r line; do :; done
   await failed('broken', 'profile_status_failed');
   // The broken status fixture is no longer needed for account.state reads.
   rmSync(join(accountsDir, 'broken'), { recursive: true });
+  const secret = 'sk-ant-oat01-testtoken123';
+  const stored = await client.request({
+    type: 'account.token.set',
+    profile: 'work',
+    token: secret,
+  });
+  assert.ok(stored.type === 'response' && stored.ok);
+  await client.request({ type: 'account.status' });
+  const tokenState = await client.wait(
+    (message) =>
+      message.type === 'account.state' &&
+      (message.profiles?.some((entry) => entry.profile === 'work' && entry.token === true) ??
+        false),
+  );
+  assert.ok(!JSON.stringify(tokenState).includes(secret));
   const starting = open(first, 'work');
   const duplicate = await open(first, 'work');
   assert.ok(duplicate.type === 'response' && !duplicate.ok && duplicate.code === 'native_busy');
@@ -736,12 +751,20 @@ while read -r line; do :; done
     (message) => message.type === 'terminal.data' && message.data.includes('account='),
   );
   assert.ok(data.type === 'terminal.data' && data.data.includes(join(accountsDir, 'work')));
+  assert.ok(data.data.includes('token=present'));
+  assert.ok(!data.data.includes(secret));
   await client.request({ type: 'account.status' });
   const state = await client.wait((message) => message.type === 'account.state');
   assert.ok(state.type === 'account.state' && state.profile === 'default');
   assert.deepEqual(
     state.profiles?.find((entry) => entry.profile === 'work'),
-    { profile: 'work', loggedIn: true, email: 'test@example.invalid', subscriptionType: 'max' },
+    {
+      profile: 'work',
+      loggedIn: true,
+      token: true,
+      email: 'test@example.invalid',
+      subscriptionType: 'max',
+    },
   );
   await client.request({ type: 'terminal.list' });
   const terminals = await client.wait(
@@ -750,6 +773,14 @@ while read -r line; do :; done
       message.terminals.some((entry) => entry.profile === 'work'),
   );
   assert.ok(terminals.type === 'terminals.state' && terminals.terminals[0].profile === 'work');
+  for (const type of ['account.token.set', 'account.token.clear']) {
+    const busy = await client.request({
+      type,
+      profile: 'work',
+      ...(type.endsWith('set') && { token: secret }),
+    });
+    assert.ok(busy.type === 'response' && !busy.ok && busy.code === 'native_busy');
+  }
   // A different active account can be managed while work is in use.
   const logout = await client.request({ type: 'account.logout' });
   assert.ok(logout.type === 'response' && logout.ok);
@@ -774,7 +805,9 @@ while read -r line; do :; done
     (message) => message.type === 'terminal.data' && message.sessionId === second,
   );
   assert.ok(
-    defaults.type === 'terminal.data' && defaults.data.includes(join(directory, 'default')),
+    defaults.type === 'terminal.data' &&
+      defaults.data.includes(join(directory, 'default')) &&
+      !defaults.data.includes('token=present'),
   );
   await client.request({
     type: 'terminal.close',
