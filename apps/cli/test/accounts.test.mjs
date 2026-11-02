@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
+import { execFile, spawn as spawnProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
@@ -22,7 +22,10 @@ const profiles = [
 ];
 
 // A private stand-in for the daemon; no saved credentials, system service or remote CLI is touched.
-async function daemon(t, { legacy = false, rejectProfile = false, others = [] } = {}) {
+async function daemon(
+  t,
+  { legacy = false, tokenSupport = false, rejectProfile = false, others = [] } = {},
+) {
   const directory = await mkdtemp(join(tmpdir(), 'ccdt-accounts-'));
   const server = createServer();
   const wss = new WebSocketServer({ server });
@@ -54,7 +57,12 @@ async function daemon(t, { legacy = false, rejectProfile = false, others = [] } 
           type: 'account.state',
           loggedIn: true,
           login: null,
-          ...(!legacy && { profile: 'default', profiles }),
+          ...(!legacy && {
+            profile: 'default',
+            profiles: tokenSupport
+              ? profiles.map((profile) => ({ ...profile, token: false }))
+              : profiles,
+          }),
         });
         // After the normal mode's agent exits, the list opens. q leaves it.
         if (requests.some((request) => request.type === 'terminal.open'))
@@ -102,6 +110,17 @@ async function daemon(t, { legacy = false, rejectProfile = false, others = [] } 
   return {
     directory,
     requests,
+    withInput: (args, input) =>
+      new Promise((resolve, reject) => {
+        const processChild = spawnProcess(process.execPath, [cli, ...args], { env });
+        let stdout = '',
+          stderr = '';
+        processChild.stdout.on('data', (chunk) => (stdout += chunk));
+        processChild.stderr.on('data', (chunk) => (stderr += chunk));
+        processChild.on('error', reject);
+        processChild.on('close', (code) => resolve({ code, stdout, stderr }));
+        processChild.stdin.end(input);
+      }),
     execute: (args) =>
       promisify(execFile)(process.execPath, [cli, ...args], { env, timeout: 10000 }),
     // A reader as slow as jq: the pipe is read only once the CLI has closed its connection, i.e. finished printing.
@@ -240,4 +259,25 @@ test('help explains account selection and resumed terminals', async () => {
   assert.match(stdout, /--account <账号>/);
   assert.match(stdout, /ccdt accounts/);
   assert.match(stdout, /运行中的终端保留原账号/);
+});
+
+test('account token management reads stdin privately and detects an old server', async (t) => {
+  const secret = 'sk-ant-oat01-testtoken123';
+  const old = await daemon(t);
+  const unsupported = await old.withInput(['account-token', 'set', 'work'], secret);
+  assert.equal(unsupported.code, 3);
+  assert.match(unsupported.stderr, /服务端不支持账号 OAuth 令牌/);
+  assert.ok(!JSON.stringify(unsupported).includes(secret));
+  assert.ok(!old.requests.some((request) => request.type === 'account.token.set'));
+  const current = await daemon(t, { tokenSupport: true });
+  const result = await current.withInput(['account-token', 'set', 'work'], secret);
+  assert.equal(result.code, 0);
+  assert.ok(!JSON.stringify(result).includes(secret));
+  assert.equal(
+    current.requests.find((request) => request.type === 'account.token.set').token,
+    secret,
+  );
+  const cleared = await current.withInput(['account-token', 'clear', 'work'], '');
+  assert.equal(cleared.code, 0);
+  assert.ok(current.requests.some((request) => request.type === 'account.token.clear'));
 });

@@ -497,6 +497,7 @@ export function createProxyServer(options: ServerOptions) {
     const all = await Promise.all(
       profiles.list().map(async (profile) => ({
         profile,
+        token: !!profiles.token(profile),
         ...(await accountStatus(options.claude!.executable, profiles.environment(profile))),
       })),
     );
@@ -506,9 +507,10 @@ export function createProxyServer(options: ServerOptions) {
       login: login?.url && login.profile === active ? { url: login.url } : null,
       notice,
       profile: active,
-      profiles: all.map(({ profile, loggedIn, email, subscriptionType }) => ({
+      profiles: all.map(({ profile, loggedIn, token, email, subscriptionType }) => ({
         profile,
         loggedIn,
+        token,
         ...(email && { email }),
         ...(subscriptionType && { subscriptionType }),
       })),
@@ -548,13 +550,31 @@ export function createProxyServer(options: ServerOptions) {
       await publishAccount();
       return;
     }
-    const profile = profiles.active;
+    const profile =
+      command.type === 'account.token.set' || command.type === 'account.token.clear'
+        ? command.profile
+        : profiles.active;
+    if (!profiles.has(profile)) throw new DomainError('profile_unknown', `没有账号 ${profile}。`);
     if (usedBy(profile) || mutations.size)
       throw new DomainError('native_busy', '请先结束使用这个账号的原生运行或终端，再管理账号。');
+    if (command.type === 'account.token.set' || command.type === 'account.token.clear') {
+      if (login) throw new DomainError('login_active', '请先完成或取消正在进行的登录。');
+      try {
+        profiles.setToken(
+          profile,
+          command.type === 'account.token.set' ? command.token : undefined,
+        );
+      } catch {
+        throw new DomainError('token_failed', '无法保存或清除令牌，请检查服务端磁盘与权限。');
+      }
+      await publishAccount();
+      return;
+    }
     const { NativeLogin, accountLogout } = await import('./native-account.ts');
     if (command.type === 'account.logout') {
       login?.process.cancel();
       try {
+        profiles.setToken(profile);
         await accountLogout(options.claude.executable, profiles.environment(profile));
       } catch {
         throw new DomainError('logout_failed', '退出登录失败，请在原生终端执行 /logout 确认。');
@@ -562,6 +582,8 @@ export function createProxyServer(options: ServerOptions) {
       await publishAccount();
       return;
     }
+    if (profiles.token(profile))
+      throw new DomainError('token_active', '请先清除该账号的 OAuth 令牌，再登录。');
     if (!login) {
       const current: Login = {
         owner: peer,
@@ -995,6 +1017,8 @@ export function createProxyServer(options: ServerOptions) {
       case 'account.code':
       case 'account.cancel':
       case 'account.logout':
+      case 'account.token.set':
+      case 'account.token.clear':
       case 'account.use':
       case 'account.add':
         await account(peer, command);

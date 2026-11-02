@@ -32,6 +32,7 @@ const accountProfile = z.string().regex(ACCOUNT_PROFILE_PATTERN);
 export const accountProfileSchema = z.object({
   profile: accountProfile,
   loggedIn: z.boolean(),
+  token: z.boolean().optional(),
   email: z.string().optional(),
   subscriptionType: z.string().optional(),
 });
@@ -342,6 +343,17 @@ export const commandSchema = z.discriminatedUnion('type', [
     .strict(),
   z.object({ type: z.literal('account.cancel'), ...request }).strict(),
   z.object({ type: z.literal('account.logout'), ...request }).strict(),
+  z
+    .object({
+      type: z.literal('account.token.set'),
+      ...request,
+      profile: accountProfile,
+      token: z.string().regex(/^sk-ant-oat01-[A-Za-z0-9_-]{10,2048}$/),
+    })
+    .strict(),
+  z
+    .object({ type: z.literal('account.token.clear'), ...request, profile: accountProfile })
+    .strict(),
   // Chooses the account for runs and terminals started from now on; running ones keep theirs.
   z.object({ type: z.literal('account.use'), ...request, profile: accountProfile }).strict(),
   // Creates an account, signed out, and makes it the active one.

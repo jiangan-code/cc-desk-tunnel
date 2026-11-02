@@ -32,6 +32,7 @@ const USAGE = `用法：
   ccdt ls [目录]         列出 agent 和它们此刻的状态（需要后台服务）；--json 输出 JSON
   ccdt codex-pool        Manage local Codex account homes and quota
   ccdt accounts          列出服务端账号和登录状态；--json 输出 JSON，旧服务端退出码为 3
+  ccdt account-token set|clear <账号>  保存或清除账号的 OAuth 令牌（set 从标准输入读取）
   ccdt rm <会话 ID>…     删除已停止的 agent 和它的对话（需要后台服务）
   ccdt daemon install    装成 systemd 用户服务：关掉终端 agent 也继续运行
   ccdt daemon status | stop | uninstall
@@ -110,6 +111,15 @@ export async function main(argv) {
       return 0;
     }
     if (positionals[0] === 'daemon') return await daemon(positionals[1]);
+    if (positionals[0] === 'account-token') {
+      if (
+        positionals.length !== 3 ||
+        !['set', 'clear'].includes(positionals[1]) ||
+        !ACCOUNT_PROFILE_PATTERN.test(positionals[2])
+      )
+        throw new UsageError('用法：ccdt account-token set|clear <账号>');
+      return await accountToken(positionals[1], positionals[2]);
+    }
     if (positionals[0] === 'accounts') {
       if (positionals.length > 1) throw new UsageError('accounts 不接受目录或其他参数。');
       return await accounts(values);
@@ -422,17 +432,7 @@ async function run(directory, values) {
 async function accounts(values) {
   let connection, bridge;
   try {
-    if (await daemonRunning())
-      connection = await openConnection(`ws+unix://${daemonSocket()}:/`, null);
-    else {
-      const config = await loadConfig();
-      if (!config?.token) throw new Error('没有可用的服务配置或凭据；请先运行 ccdt login。');
-      bridge = await openProxyBridge(
-        { url: config.url, fingerprint: config.fingerprint },
-        { resolveProxy: async (target) => environmentProxy(target) },
-      );
-      connection = await openConnection(bridge.url, config.token);
-    }
+    ({ connection, bridge } = await accountConnection());
     const state = await listAccounts(connection);
     if (values.json) console.log(JSON.stringify(state));
     else {
@@ -448,6 +448,59 @@ async function accounts(values) {
           ].join('\t'),
         );
     }
+    return 0;
+  } finally {
+    connection?.close();
+    await bridge?.close();
+  }
+}
+
+async function accountConnection() {
+  if (await daemonRunning())
+    return { connection: await openConnection(`ws+unix://${daemonSocket()}:/`, null) };
+  const config = await loadConfig();
+  if (!config?.token) throw new Error('没有可用的服务配置或凭据；请先运行 ccdt login。');
+  const bridge = await openProxyBridge(
+    { url: config.url, fingerprint: config.fingerprint },
+    { resolveProxy: async (target) => environmentProxy(target) },
+  );
+  try {
+    return { connection: await openConnection(bridge.url, config.token), bridge };
+  } catch (error) {
+    await bridge.close();
+    throw error;
+  }
+}
+
+async function accountToken(action, profile) {
+  let token;
+  if (action === 'set') {
+    if (process.stdin.isTTY) token = await askSecret('OAuth 令牌（不回显）：');
+    else {
+      const chunks = [];
+      for await (const chunk of process.stdin) chunks.push(chunk);
+      token = Buffer.concat(chunks).toString('utf8').trim();
+    }
+    if (!/^sk-ant-oat01-[A-Za-z0-9_-]{10,2048}$/.test(token))
+      throw new Error('OAuth 令牌格式无效，请提供 claude setup-token 输出的令牌。');
+  }
+  let connection, bridge;
+  try {
+    ({ connection, bridge } = await accountConnection());
+    const state = await listAccounts(connection);
+    if (state.accounts.some((account) => account.token === undefined)) {
+      const error = new Error('服务端不支持账号 OAuth 令牌，请升级并重新部署服务端。');
+      error.exitCode = 3;
+      throw error;
+    }
+    if (!state.accounts.some((account) => account.profile === profile))
+      throw new Error(`没有账号 ${profile}。`);
+    await connection.request(
+      action === 'set'
+        ? { type: 'account.token.set', profile, token }
+        : { type: 'account.token.clear', profile },
+    );
+    console.log(action === 'set' ? '已保存账号 OAuth 令牌。' : '已清除账号 OAuth 令牌。');
     return 0;
   } finally {
     connection?.close();

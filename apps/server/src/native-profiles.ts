@@ -1,15 +1,17 @@
 import {
+  chmodSync,
   copyFileSync,
   existsSync,
   mkdirSync,
   readdirSync,
   readFileSync,
   renameSync,
+  rmSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { ACCOUNT_PROFILE_PATTERN, DEFAULT_ACCOUNT_PROFILE } from '@cc-desk-tunnel/protocol';
 
 // What the user wrote for the CLI rather than what the CLI keeps; a new account links to the default one's.
@@ -81,9 +83,33 @@ export class AccountProfiles {
   directory(profile: string) {
     return profile === DEFAULT_ACCOUNT_PROFILE ? undefined : join(this.root, profile);
   }
+  private tokenPath(profile: string) {
+    if (!this.has(profile)) throw new Error('Unknown account profile');
+    return join(dirname(this.stateFile), 'account-tokens', profile);
+  }
+  token(profile: string): string | undefined {
+    try {
+      return readFileSync(this.tokenPath(profile), 'utf8').trim() || undefined;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+      throw error;
+    }
+  }
+  setToken(profile: string, token?: string) {
+    const path = this.tokenPath(profile);
+    if (!token) return rmSync(path, { force: true });
+    const directory = dirname(path);
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    chmodSync(directory, 0o700);
+    writeFileSync(path, token, { mode: 0o600 });
+    chmodSync(path, 0o600);
+  }
   // Added to the environment of a CLI process that runs as this account.
   environment(profile: string): Record<string, string> {
     const directory = this.directory(profile);
-    return directory ? { CLAUDE_CONFIG_DIR: directory } : {};
+    return {
+      ...(directory && { CLAUDE_CONFIG_DIR: directory }),
+      CLAUDE_CODE_OAUTH_TOKEN: this.token(profile) ?? '',
+    };
   }
 }
