@@ -85,6 +85,11 @@ export function openConnection(url, token, { timeoutMs = 60000 } = {}) {
         // Older services reject the incremental terminal.open field without a request ID.
         if (message.code === 'invalid_command') {
           for (const [id, request] of pending) {
+            if (request.command.type === 'session.export') {
+              pending.delete(id);
+              request.reject(new Error(message.message));
+              continue;
+            }
             if (request.command.type !== 'terminal.open' || request.command.profile === undefined)
               continue;
             pending.delete(id);
