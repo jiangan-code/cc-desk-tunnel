@@ -15,6 +15,7 @@ export type ClaudeOptions = {
   settingsPath?: string;
   maxTurns?: number;
   contextRetentionDays?: number;
+  trustedHookProjects?: string[];
   // Added to the CLI's inherited environment; set by the service for its usage collector.
   environment?: Record<string, string>;
 };
