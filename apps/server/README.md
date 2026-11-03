@@ -20,6 +20,7 @@ Linux 上的代理服务：认证客户端、管理会话、驱动官方 Claude 
 
 - `src/tunnel.ts`：每个在线设备独立 frps，临时 token、限定回环映射端口；注册密钥后用原生 ssh 探测。凭据在 `connections/<id>/`（目录 0700、文件 0600），断连停止 frps 并删除目录。
 - `src/claude.ts`：官方 SDK `query` 驱动指定的原生 CLI；提示词给 Windows cwd、PowerShell 和 SSH config 路径。`canUseTool` 只转发原生权限请求，不注册新增 MCP 工具、不自行决定审批策略。
+- `src/project-skills.ts`：启动会话时经 SSH 读取桌面项目 `.claude/skills` 的名称和描述，在会话目录生成转发命令；调用时再经 SSH 读取原始文件及其引用。每次启动刷新并移除过期转发，不复制正文、脚本或资源。项目其他 frontmatter 和 hooks 不会转发；SSH 失败时启动报错。
 - `src/native-input.ts`：同一运行可追加 async user message，带客户端 UUID、human origin，原生负责调度 / 合并。结果按 `user_message_uuids` 和 `queued_turn_count` 处理，不能首个 result 就丢弃后续输入；收尾同步停止接收。取消 / 断连 / 重启不重放，未送达与接收未确认分别记录。
 - `src/claude-stream.ts`：适配公开文字 / 思考 / 工具入参和结果。不解析未公开隐藏推理，不把自建结果格式塞回原生工具。
 - 工具进度来自原生 `tool_progress`；Bash 输出按原生工具结果展示，不承诺每行 stdout 实时接出。

@@ -643,6 +643,9 @@ test('offline mode cannot open a native terminal or accept unauthenticated termi
 test('terminals choose accounts without switching the active account and protect the account they use', async (t) => {
   const directory = mkdtempSync(join(tmpdir(), 'ccdt-account-terminal-'));
   const previous = process.env.CLAUDE_CONFIG_DIR;
+  const previousPath = process.env.PATH;
+  writeFileSync(join(directory, 'ssh'), '#!/bin/sh\nexec /bin/bash -c "$4"\n', { mode: 0o755 });
+  process.env.PATH = `${directory}:${previousPath}`;
   process.env.CLAUDE_CONFIG_DIR = join(directory, 'default');
   mkdirSync(process.env.CLAUDE_CONFIG_DIR);
   const accountsDir = join(directory, 'accounts');
@@ -698,6 +701,8 @@ while read -r line; do :; done
   t.after(async () => {
     client.socket.terminate();
     await server.close();
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
     if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;
     else process.env.CLAUDE_CONFIG_DIR = previous;
     rmSync(directory, { recursive: true, force: true });

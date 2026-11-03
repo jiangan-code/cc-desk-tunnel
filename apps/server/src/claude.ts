@@ -7,6 +7,7 @@ import { ClaudeStream } from './claude-stream.ts';
 import type { SshConnection } from './tunnel.ts';
 import { nativeCapabilities, nativeContextRefresh, nativeMetrics } from './native-controls.ts';
 import type { NativeInput } from './native-input.ts';
+import { refreshProjectSkills } from './project-skills.ts';
 
 export type ClaudeOptions = {
   executable: string;
@@ -136,6 +137,7 @@ export async function runClaude(
   if (process.platform === 'win32') throw new Error('Native adapter must run on Linux.');
   const mapper = new ClaudeStream(run.emit, run.permissionMode, run.effort);
   const cwd = prepareNativeDirectory(options, run.dataDir, run.nativeRoot);
+  await refreshProjectSkills(cwd, run.projectPath, run.ssh);
   if (run.resume && !(await getSessionInfo(run.sessionId, { dir: cwd }))) {
     run.emit({
       type: 'run.error',
