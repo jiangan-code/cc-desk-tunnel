@@ -29,6 +29,14 @@ export function environmentConfig(env: NodeJS.ProcessEnv, defaultDataDir: string
   if (env.PROXY_TLS_MODE && !['direct', 'reverse-proxy'].includes(env.PROXY_TLS_MODE))
     throw new Error('PROXY_TLS_MODE must be direct or reverse-proxy.');
   const retention = Number(env.CLAUDE_CONTEXT_RETENTION_DAYS ?? 3650);
+  const trustedHookProjects: unknown = env.PROXY_TRUSTED_HOOK_PROJECTS
+    ? JSON.parse(env.PROXY_TRUSTED_HOOK_PROJECTS)
+    : [];
+  if (
+    !Array.isArray(trustedHookProjects) ||
+    !trustedHookProjects.every((p) => typeof p === 'string' && p.startsWith('/'))
+  )
+    throw new Error('PROXY_TRUSTED_HOOK_PROJECTS must be a JSON array of absolute Linux paths.');
   if (!Number.isInteger(retention) || retention < 1)
     throw new Error('Invalid CLAUDE_CONTEXT_RETENTION_DAYS');
   const resumeGraceMs = Number(env.PROXY_RESUME_GRACE_MS ?? 1800000);
@@ -72,6 +80,7 @@ export function environmentConfig(env: NodeJS.ProcessEnv, defaultDataDir: string
           model: env.CLAUDE_MODEL,
           settingsPath: env.CLAUDE_SETTINGS_PATH,
           contextRetentionDays: retention,
+          trustedHookProjects,
         }
       : undefined,
   };

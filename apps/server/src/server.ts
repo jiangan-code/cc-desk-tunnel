@@ -745,6 +745,7 @@ export function createProxyServer(options: ServerOptions) {
       profile,
     };
     terminals.set(current.id, current);
+    let hookSettingsPath: string | undefined;
     try {
       // Reserve the terminal before reading sign-in state so login/logout cannot race the launch.
       if (command.profile !== undefined) {
@@ -783,12 +784,27 @@ export function createProxyServer(options: ServerOptions) {
         command.continue,
         command.recover,
       );
+      const { terminalHookSettings } = await import('./project-hooks.ts');
+      hookSettingsPath = join(cwd, `.ccdt-terminal-hooks-${current.id}.json`);
+      const terminalSettings = await terminalHookSettings(
+        session.projectPath,
+        peer.tunnel.ssh,
+        options.claude.trustedHookProjects ?? [],
+        options.claude.settingsPath,
+        hookSettingsPath,
+      );
       if (closing || peer.socket.readyState !== WebSocket.OPEN)
         throw new Error('Connection closed');
       current.process = new NativeTerminal(
         options.claude.executable,
         [
-          ...terminalArguments(options.claude, session, peer.tunnel.ssh, continued, nativeId),
+          ...terminalArguments(
+            { ...options.claude, settingsPath: terminalSettings ?? options.claude.settingsPath },
+            session,
+            peer.tunnel.ssh,
+            continued,
+            nativeId,
+          ),
           ...(command.recover
             ? [
                 '网络连接已恢复，请继续之前未完成的任务。中断的工具结果可能未知，请先核实，不要假定成功。',
@@ -814,6 +830,7 @@ export function createProxyServer(options: ServerOptions) {
             bytes,
           }),
         (exitCode) => {
+          if (terminalSettings) void rm(terminalSettings, { force: true }).catch(() => {});
           if (terminals.get(current.id) !== current) return;
           terminals.delete(current.id);
           store.append(current.sessionId, current.id, {
@@ -843,6 +860,7 @@ export function createProxyServer(options: ServerOptions) {
       publishTerminals(peer);
     } catch (error) {
       await current.process?.close();
+      if (hookSettingsPath) await rm(hookSettingsPath, { force: true });
       if (terminals.get(current.id) === current) terminals.delete(current.id);
       publishTerminals(peer);
       if (error instanceof DomainError) throw error;

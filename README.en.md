@@ -213,3 +213,30 @@ CODEX_HOME="$codex_home" codex <worker arguments>
 ```
 
 `--env` is intended for launchers that parse the single `CODEX_HOME=` line as data; its value is not shell-quoted and should not be passed to `eval`.
+
+### Desktop project hooks (Linux native terminals)
+
+The hook bridge is off by default. To trust specific Linux desktop projects, set
+`PROXY_TRUSTED_HOOK_PROJECTS` in the server's `config/service.env` to a JSON array
+of exact absolute desktop project paths, for example:
+
+```sh
+PROXY_TRUSTED_HOOK_PROJECTS='["/home/user/project"]'
+```
+
+Deploy the updated service and restart it after changing this setting. This is a
+server-wide path allowlist: the same path on any desktop connected to this server
+is trusted. Only add paths whose owners and project hooks you trust. A trusted
+project's `.claude/settings.json` command hooks run with the desktop user's full
+permissions. The bridge reads settings at each terminal launch and runs commands
+on the desktop over SSH; it does not copy hook scripts. Non-command hooks, exec
+form (`args`), and PowerShell hooks are unsupported and cause launch to fail.
+
+The bridge applies only to persistent native terminals. SDK/one-shot runs do not
+receive desktop hooks: their Claude process ends at turn completion, so it cannot
+receive an idle `asyncRewake`. Disconnecting SSH fails the hook; for an
+`asyncRewake` hook the bridge reports the transport failure as exit 2 so Claude
+can wake and report it. A hook's `transcript_path` refers to the service host;
+desktop scripts cannot read it without a separate, authorized access mechanism.
+The bridge does not translate paths in hook input or tool arguments. A terminal
+must be relaunched to load changed settings or a changed allowlist.
