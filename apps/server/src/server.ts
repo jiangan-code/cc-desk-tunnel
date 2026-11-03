@@ -663,6 +663,16 @@ export function createProxyServer(options: ServerOptions) {
     const closed = () => controller.abort();
     peer.socket.once('close', closed);
     try {
+      if (peer.tunnel?.ssh) {
+        const { refreshProjectSkills } = await import('./project-skills.ts');
+        const session = store.get(command.sessionId).session;
+        const cwd = prepareNativeDirectory(
+          options.claude,
+          store.directory,
+          nativeRoot(command.sessionId),
+        );
+        await refreshProjectSkills(cwd, session.projectPath, peer.tunnel.ssh);
+      }
       const events = await readNativeStatus(
         claudeAs(profiles.active),
         store.directory,
@@ -763,6 +773,8 @@ export function createProxyServer(options: ServerOptions) {
         throw new Error('Connection closed');
       completeOnboarding(profiles.directory(current.profile));
       const cwd = prepareNativeDirectory(options.claude, store.directory, nativeRoot(session.id));
+      const { refreshProjectSkills } = await import('./project-skills.ts');
+      await refreshProjectSkills(cwd, session.projectPath, peer.tunnel.ssh);
       trustDirectory(cwd, profiles.directory(current.profile));
       // Runs and terminals of a session share this directory, so the latest conversation may be either. Without one,
       // `--continue` would end the CLI at once.
