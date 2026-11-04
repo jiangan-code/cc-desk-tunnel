@@ -18,9 +18,12 @@ const FAKES = {
 echo "$*" >> "$LOG/ssh"
 case "$*" in *ProxyCommand*) exec sleep 30 ;; esac
 exit 255`,
-  getent: 'echo "203.0.113.7 STREAM vps.example"',
+  getent: `if [ -f "$LOG/dns" ]; then cat "$LOG/dns" | tee -a "$LOG/resolved"; else echo "203.0.113.7 STREAM vps.example"; fi`,
   ip: `case "$*" in
-  "route get"*) echo "203.0.113.7 dev $ROUTE_DEV src 10.0.0.2 uid 1000" ;;
+  "route get"*)
+    [ -f "$LOG/ip-fail" ] && exit 1
+    if [ -f "$LOG/devices" ]; then ROUTE_DEV=$(awk -v address="$3" '$1 == address {print $2}' "$LOG/devices"); fi
+    echo "203.0.113.7 dev $ROUTE_DEV src 10.0.0.2 uid 1000" ;;
   *"show dev tun0") echo "5: tun0: <POINTOPOINT,UP> mtu 9000 link/none promiscuity 0 tun type tun pi off" ;;
   *) echo "2: eth0: <UP> mtu 1500 link/ether 00:00:00:00:00:01" ;;
 esac`,
@@ -57,6 +60,7 @@ async function setup() {
   const state = join(run, 'ccdt-tunnel.state');
   return {
     root,
+    home,
     env,
     state,
     // The forward as `run` left it: the route it uses, the ones it skipped and the routes it saw.
@@ -76,6 +80,128 @@ test('the forward moves to a TUN that came up after it', linux, async () => {
     assert.match(stdout, /从 socks:10808 换到 tun:tun0/);
     assert.match(await t.log('systemctl'), /restart ccdt-tunnel\.service/);
   } finally {
+    await rm(t.root, { recursive: true, force: true });
+  }
+});
+
+test('watch refreshes DNS and configuration on each check', linux, async () => {
+  const t = await setup();
+  await writeFile(join(t.root, 'dns'), '');
+  await writeFile(join(t.root, 'devices'), '203.0.113.7 tun0\n203.0.113.8 eth0\n');
+  await writeFile(join(t.root, 'bin/sleep'), '#!/bin/sh\n/bin/sleep 0.1\n');
+  await chmod(join(t.root, 'bin/sleep'), 0o755);
+  await t.held('tun:tun0', '', 'tun:tun0 ');
+  const child = spawn('sh', [script, 'watch'], {
+    env: t.env({ LISTEN: '10809' }),
+    stdio: 'ignore',
+    detached: true,
+  });
+  const waitFor = async (predicate) => {
+    for (let i = 0; i < 100; i++) {
+      if (await predicate()) return;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.fail('watch did not observe the change');
+  };
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    assert.doesNotMatch(await t.log('systemctl'), /restart/);
+    await writeFile(join(t.root, 'dns'), '203.0.113.7 STREAM vps.example\n');
+    await waitFor(async () => /203\.0\.113\.7/.test(await t.log('resolved')));
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.doesNotMatch(await t.log('systemctl'), /restart/);
+    await writeFile(join(t.root, 'dns'), '203.0.113.8 STREAM vps.example\n');
+    await waitFor(async () => /restart/.test(await t.log('systemctl')));
+    await t.held('direct', '', 'direct ');
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    await writeFile(join(t.root, 'systemctl'), '');
+    await writeFile(
+      join(t.home, '.config/cc-desk-tunnel/tunnel.conf'),
+      "host='vps'\nproxies='10809'\n",
+    );
+    await waitFor(async () => /restart/.test(await t.log('systemctl')));
+  } finally {
+    process.kill(-child.pid);
+    await rm(t.root, { recursive: true, force: true });
+  }
+});
+
+test('check skips unknown routes and retries after recovery', linux, async () => {
+  const t = await setup();
+  try {
+    await t.held('tun:tun0', '', 'tun:tun0 socks:10808 ');
+    await writeFile(join(t.root, 'dns'), '');
+    assert.match((await t.check(TUN)).stderr, /无法解析/);
+    await writeFile(join(t.root, 'dns'), '203.0.113.7 STREAM vps.example\n');
+    await writeFile(join(t.root, 'ip-fail'), '');
+    assert.match((await t.check(TUN)).stderr, /无法查询/);
+    assert.doesNotMatch(await t.log('systemctl'), /restart/);
+    await rm(join(t.root, 'ip-fail'));
+    await t.check({ ROUTE_DEV: 'eth0', LISTEN: '10808' });
+    assert.match(await t.log('systemctl'), /restart/);
+  } finally {
+    await rm(t.root, { recursive: true, force: true });
+  }
+});
+
+test('run still falls back to the proxy when address resolution fails', linux, async () => {
+  const t = await setup();
+  await writeFile(join(t.root, 'dns'), '');
+  const child = spawn('sh', [script, 'run'], { env: t.env(TUN), stdio: 'ignore', detached: true });
+  try {
+    for (let i = 0; i < 100 && !/ProxyCommand/.test(await t.log('ssh')); i++)
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.match(await t.log('ssh'), /ProxyCommand/);
+    assert.equal(
+      await readFile(t.state, 'utf8'),
+      "route='socks:10808'\nskipped=''\nseen='socks:10808 direct '\n",
+    );
+  } finally {
+    process.kill(-child.pid);
+    await rm(t.root, { recursive: true, force: true });
+  }
+});
+
+test('run publishes state only after the complete replacement is ready', linux, async () => {
+  const t = await setup();
+  await t.held('direct', '', 'direct ');
+  await writeFile(
+    join(t.root, 'bin/mv'),
+    `#!/bin/sh
+touch "$LOG/mv-ready"
+while [ ! -f "$LOG/mv-go" ]; do /bin/sleep 0.02; done
+exec /bin/mv "$@"
+`,
+  );
+  await chmod(join(t.root, 'bin/mv'), 0o755);
+  const child = spawn('sh', [script, 'run'], {
+    env: t.env({ ROUTE_DEV: 'eth0', LISTEN: '10808' }),
+    stdio: 'ignore',
+    detached: true,
+  });
+  try {
+    let ready = false;
+    for (let i = 0; i < 100 && !ready; i++) {
+      ready = await readFile(join(t.root, 'mv-ready')).then(
+        () => true,
+        () => false,
+      );
+      if (ready) break;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.ok(ready);
+    // The old state stays readable until the replacement is renamed.
+    assert.equal(await readFile(t.state, 'utf8'), "route='direct'\nskipped=''\nseen='direct '\n");
+    await writeFile(join(t.root, 'mv-go'), '');
+    for (let i = 0; i < 100 && !/ProxyCommand/.test(await t.log('ssh')); i++)
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.match(await t.log('ssh'), /ProxyCommand/);
+    assert.equal(
+      await readFile(t.state, 'utf8'),
+      "route='socks:10808'\nskipped=''\nseen='socks:10808 direct '\n",
+    );
+  } finally {
+    process.kill(-child.pid);
     await rm(t.root, { recursive: true, force: true });
   }
 });
