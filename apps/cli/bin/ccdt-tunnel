@@ -37,13 +37,30 @@ load() {
   fi
   host= ports=18787 proxies=
   . "$CONFIG"
-  address=$(ssh -G "$host" 2>/dev/null | awk '$1 == "hostname" { print $2 }')
-  address=$(getent ahosts "$address" | awk 'NR == 1 { print $1 }')
+  address=
+  if ssh_config=$(ssh -G "$host" 2>/dev/null); then
+    hostname=$(printf '%s\n' "$ssh_config" | awk '$1 == "hostname" { print $2; exit }')
+    if [ -n "$hostname" ] && addresses=$(getent ahosts "$hostname"); then
+      address=$(printf '%s\n' "$addresses" | awk 'NR == 1 { print $1 }')
+    fi
+  fi
 }
 
 # The TUN interface the route to the host goes through, if it does.
 tun_device() {
-  dev=$(ip route get "$address" 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -n 1)
+  if [ -z "$address" ]; then
+    echo "无法解析 SSH 主机地址，无法判断 TUN 路线" >&2
+    return 1
+  fi
+  if ! route_info=$(ip route get "$address" 2>/dev/null); then
+    echo "无法查询 $address 的路线" >&2
+    return 1
+  fi
+  dev=$(printf '%s\n' "$route_info" | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -n 1)
+  if [ -z "$dev" ]; then
+    echo "无法确定 $address 的路线设备" >&2
+    return 1
+  fi
   [ -n "$dev" ] && ip -d -o link show dev "$dev" 2>/dev/null | grep -q ' tun type ' && echo "$dev"
   return 0
 }
@@ -60,7 +77,7 @@ proxy_ports() {
 }
 # The routes available now, best first, on one line.
 candidates() {
-  dev=$(tun_device)
+  dev=$(tun_device) || { [ "${1:-}" != strict ] || return 1; dev=; }
   {
     [ -n "$dev" ] && echo "tun:$dev"
     for port in $(proxy_ports); do echo "socks:$port"; done
@@ -80,7 +97,12 @@ run() {
   skipped=
   for route in $seen; do
     echo "使用线路 $route（可用：$seen）"
-    printf "route='%s'\nskipped='%s'\nseen='%s'\n" "$route" "$skipped" "$seen" >"$STATE"
+    state_tmp=$(mktemp "${STATE}.XXXXXX") || exit 1
+    if ! printf "route='%s'\nskipped='%s'\nseen='%s'\n" "$route" "$skipped" "$seen" >"$state_tmp" ||
+      ! mv -f "$state_tmp" "$STATE"; then
+      rm -f "$state_tmp"
+      exit 1
+    fi
     start=$(date +%s)
     case $route in
       socks:*) forward -o "ProxyCommand=nc -X 5 -x 127.0.0.1:${route#socks:} %h %p" ;;
@@ -102,7 +124,7 @@ check() {
   [ -r "$STATE" ] || return 0
   route= skipped= seen=
   . "$STATE"
-  now=$(candidates)
+  now=$(candidates strict) || return 0
   [ "$now" = "$seen" ] || skipped=
   for best in $now; do
     case " $skipped " in *" $best "*) continue ;; esac
@@ -177,7 +199,7 @@ case ${1:-} in
   uninstall) uninstall ;;
   run) load; run ;;
   check) load; check ;;
-  watch) load; while :; do check; sleep 15; done ;;
+  watch) while :; do load; check; sleep 15; done ;;
   status)
     load
     echo "可用线路：$(candidates)"
