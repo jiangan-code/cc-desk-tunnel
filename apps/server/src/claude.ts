@@ -1,4 +1,4 @@
-import { mkdirSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { query, getSessionInfo } from '@anthropic-ai/claude-agent-sdk';
 import type { Query, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
@@ -16,6 +16,8 @@ export type ClaudeOptions = {
   maxTurns?: number;
   contextRetentionDays?: number;
   trustedHookProjects?: string[];
+  // Web search goes through Exa instead of the built-in WebSearch; set when the service has EXA_API_KEY.
+  exaSearch?: boolean;
   // Added to the CLI's inherited environment; set by the service for its usage collector.
   environment?: Record<string, string>;
 };
@@ -110,6 +112,39 @@ export function withStatusHooks(settings: { hooks?: Record<string, HookGroup[]> 
     ];
   return { ...settings, hooks };
 }
+// Exa's hosted MCP server (https://exa.ai/docs/reference/exa-mcp). The key stays a placeholder that the CLI expands
+// from its environment, so it is never written to a file or a command line.
+const EXA_SERVER = {
+  type: 'http',
+  url: 'https://mcp.exa.ai/mcp',
+  headers: { 'x-api-key': '${EXA_API_KEY}' },
+};
+const toggle = (list: string[] | undefined, item: string, on: boolean) => [
+  ...(list ?? []).filter((value) => value !== item),
+  ...(on ? [item] : []),
+];
+// Adds Exa to the session directory's MCP servers, enables it and denies the built-in WebSearch, or takes all three
+// out again; anything else the user put there is kept.
+function applyExaSearch(cwd: string, settings: Record<string, any>, on: boolean) {
+  const mcpPath = join(cwd, '.mcp.json');
+  const mcp = existsSync(mcpPath) ? JSON.parse(readFileSync(mcpPath, 'utf8')) : {};
+  const servers = { ...mcp.mcpServers };
+  if (on) servers.exa = EXA_SERVER;
+  else delete servers.exa;
+  if (Object.keys(servers).length || Object.keys(mcp).length > 1)
+    writeFileSync(mcpPath, JSON.stringify({ ...mcp, mcpServers: servers }, null, 2) + '\n', {
+      mode: 0o600,
+    });
+  else rmSync(mcpPath, { force: true });
+  const enabled = toggle(settings.enabledMcpjsonServers, 'exa', on);
+  if (enabled.length) settings.enabledMcpjsonServers = enabled;
+  else delete settings.enabledMcpjsonServers;
+  const deny = toggle(settings.permissions?.deny, 'WebSearch', on);
+  const { deny: _, ...permissions } = settings.permissions ?? {};
+  if (deny.length) settings.permissions = { ...permissions, deny };
+  else if (Object.keys(permissions).length) settings.permissions = permissions;
+  else delete settings.permissions;
+}
 export const hookEnvironment = (address: string) => ({ [HOOK_VARIABLE]: address });
 // Names the session a CLI process belongs to. The Linux desktop's SSH configuration sends it with every command (see
 // `sshConfig`), so a tool there can tell which session ran a command and look that session up in `ccdt ls`.
@@ -125,6 +160,7 @@ export function prepareNativeDirectory(options: ClaudeOptions, dataDir: string, 
     ? JSON.parse(readFileSync(localSettingsPath, 'utf8'))
     : {};
   settings.cleanupPeriodDays = options.contextRetentionDays ?? 3650;
+  applyExaSearch(cwd, settings, !!options.exaSearch);
   writeFileSync(localSettingsPath, JSON.stringify(withStatusHooks(settings), null, 2) + '\n', {
     mode: 0o600,
   });
