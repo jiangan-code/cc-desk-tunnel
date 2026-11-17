@@ -6,11 +6,11 @@
 
 在新 Mac 安装 [Node.js 24 的 macOS ARM64 版本](https://nodejs.org/en/download)，确认 `node -p 'process.version + " " + process.arch'` 显示 `v24.x.x arm64`。
 
-把 `ccdt-0.2.5-node.tar.gz` 放到下载目录，执行：
+把 `ccdt-0.2.6-node.tar.gz` 放到下载目录，执行：
 
 ```bash
 mkdir -p ~/.local/share/cc-desk-tunnel
-tar -xzf ~/Downloads/ccdt-0.2.5-node.tar.gz -C ~/.local/share/cc-desk-tunnel
+tar -xzf ~/Downloads/ccdt-0.2.6-node.tar.gz -C ~/.local/share/cc-desk-tunnel
 node ~/.local/share/cc-desk-tunnel/ccdt/install.mjs
 export PATH="$HOME/.local/bin:$PATH"
 ccdt login
@@ -28,7 +28,7 @@ ccdt daemon status
 sudo bash deploy/manage.sh upgrade --from /上传目录/cc-desk-tunnel-server.tar.gz
 ```
 
-沿用原部署的数据和账号，备份与运维见[部署操作手册](../deploy/README.md)。同一服务同一时间只接受一台执行设备，先断开旧电脑上的连接。
+沿用原部署的数据和账号，备份与运维见[部署操作手册](../deploy/README.md)。0.2.6 支持多台新版设备同时在线；旧版混用与历史归属迁移见[多设备指南](multi-device.md)。
 
 ## 日常使用
 

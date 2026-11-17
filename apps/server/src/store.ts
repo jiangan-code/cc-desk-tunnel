@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { chmodSync, mkdirSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -72,10 +72,17 @@ export class SessionStore {
         PRIMARY KEY (session_id, sequence)
       );
       CREATE INDEX IF NOT EXISTS events_run ON events(session_id, run_id, sequence);
+      CREATE TABLE IF NOT EXISTS devices (id TEXT PRIMARY KEY, key_hash TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS session_devices (
+        session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+        device_id TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS sessions_by_device ON session_devices(device_id);
       CREATE TABLE IF NOT EXISTS migrations (name TEXT PRIMARY KEY);
     `);
     try {
       this.importJson();
+      this.database.exec("INSERT OR IGNORE INTO session_devices SELECT id, 'legacy' FROM sessions");
       for (const session of this.list()) {
         if (!session.activeRun) continue;
         const { id: runId, connectionId } = session.activeRun;
@@ -161,6 +168,49 @@ export class SessionStore {
     }
   }
 
+  // The shared service token enrolls a new random identity; it cannot replace an existing device's key.
+  authenticateDevice(id: string, key: string) {
+    const hash = createHash('sha256').update(key).digest('hex');
+    this.database.prepare('INSERT OR IGNORE INTO devices VALUES (?, ?)').run(id, hash);
+    if (!this.verifyDevice(id, key))
+      throw new DomainError(
+        'device_unauthorized',
+        '设备身份验证失败；请使用本设备原有的身份文件。',
+      );
+  }
+
+  verifyDevice(id: string, key: string): boolean {
+    const row = this.database.prepare('SELECT key_hash FROM devices WHERE id = ?').get(id);
+    return (
+      !!row &&
+      timingSafeEqual(
+        Buffer.from(String(row.key_hash), 'hex'),
+        createHash('sha256').update(key).digest(),
+      )
+    );
+  }
+
+  deviceOf(sessionId: string): string | undefined {
+    const row = this.database
+      .prepare('SELECT device_id FROM session_devices WHERE session_id = ?')
+      .get(sessionId);
+    return row ? String(row.device_id) : undefined;
+  }
+
+  assertDevice(sessionId: string, deviceId: string) {
+    if (this.deviceOf(sessionId) !== deviceId)
+      throw new DomainError('not_found', '会话不存在或不属于此设备。');
+  }
+
+  listForDevice(deviceId: string): Session[] {
+    return this.database
+      .prepare(
+        "SELECT s.metadata FROM sessions s JOIN session_devices d ON d.session_id = s.id WHERE d.device_id = ? ORDER BY json_extract(s.metadata, '$.updatedAt') DESC",
+      )
+      .all(deviceId)
+      .map((row) => sessionSchema.parse(JSON.parse(String(row.metadata))));
+  }
+
   list(): Session[] {
     return this.database
       .prepare('SELECT metadata FROM sessions')
@@ -221,12 +271,13 @@ export class SessionStore {
     return row ? (JSON.parse(String(row.data)) as SessionEvent) : undefined;
   }
 
-  create(requestId: string, title: string, projectPath: string): Session {
+  create(requestId: string, title: string, projectPath: string, deviceId = 'legacy'): Session {
     const row = this.database
       .prepare('SELECT metadata FROM sessions WHERE create_request_id = ?')
       .get(requestId);
     if (row) {
       const session = sessionSchema.parse(JSON.parse(String(row.metadata)));
+      this.assertDevice(session.id, deviceId);
       if (
         ((!session.autoTitle || title !== '新会话') && session.title !== title) ||
         session.projectPath !== projectPath
@@ -247,9 +298,17 @@ export class SessionStore {
       updatedAt: now,
       activeRun: null,
     };
-    this.database
-      .prepare('INSERT INTO sessions VALUES (?, ?, ?)')
-      .run(session.id, JSON.stringify(session), requestId);
+    this.database.exec('BEGIN');
+    try {
+      this.database
+        .prepare('INSERT INTO sessions VALUES (?, ?, ?)')
+        .run(session.id, JSON.stringify(session), requestId);
+      this.database.prepare('INSERT INTO session_devices VALUES (?, ?)').run(session.id, deviceId);
+      this.database.exec('COMMIT');
+    } catch (error) {
+      this.database.exec('ROLLBACK');
+      throw error;
+    }
     return session;
   }
 
@@ -299,6 +358,9 @@ export class SessionStore {
       this.database
         .prepare('INSERT INTO sessions VALUES (?, ?, ?)')
         .run(id, JSON.stringify(session), requestId);
+      this.database
+        .prepare('INSERT INTO session_devices VALUES (?, ?)')
+        .run(id, this.deviceOf(sourceId) ?? 'legacy');
       const insert = this.database.prepare('INSERT INTO events VALUES (?, ?, ?, ?)');
       events.forEach((event, index) => {
         const payload =

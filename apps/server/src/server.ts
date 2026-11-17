@@ -73,6 +73,10 @@ type Peer = {
   id: string;
   address: string;
   authenticated: boolean;
+  deviceId: string;
+  authenticating?: boolean;
+  released?: boolean;
+  releaseTask?: Promise<void>;
   // A relay connection of the tunnel owner: it carries SSH bytes, not protocol frames.
   relay?: boolean;
   tunnel?: WindowsTunnel;
@@ -98,6 +102,7 @@ export type Run = {
   cancelReason?: string;
   input?: NativeInput;
   controls: { refresh?: () => Promise<void> };
+  done?: Promise<void>;
   // The account its CLI runs as.
   profile: string;
 };
@@ -112,6 +117,7 @@ type Terminal = {
   since: string;
   reattach?: boolean;
   profile: string;
+  hookKey: string;
 };
 // Each terminal is a CLI process with its own memory; this bounds what one device can start.
 const MAX_TERMINALS = 8;
@@ -203,7 +209,6 @@ export function createProxyServer(options: ServerOptions) {
     publishTerminals(current.owner);
   }
   // Native terminals report their state here through the hooks of their directory (see `withStatusHooks`).
-  const hookSecret = randomBytes(24).toString('base64url');
   let hookAddress = '';
   const hookServer = options.claude
     ? createServer((request, response) => {
@@ -211,7 +216,12 @@ export function createProxyServer(options: ServerOptions) {
           /^\/terminal\/([^/]+)\/([^/]+)\/([a-z]+)$/.exec(request.url ?? '') ?? [];
         const current = terminalId ? terminals.get(terminalId) : undefined;
         const parsed = terminalStatusSchema.safeParse(status);
-        if (request.method !== 'POST' || !current || secret !== hookSecret || !parsed.success) {
+        if (
+          request.method !== 'POST' ||
+          !current ||
+          secret !== current.hookKey ||
+          !parsed.success
+        ) {
           request.resume();
           response.writeHead(404).end();
         } else {
@@ -233,7 +243,7 @@ export function createProxyServer(options: ServerOptions) {
       })
     : undefined;
   let login: Login | undefined;
-  let tunnelOwner: Peer | undefined;
+  const deviceConnections = new Map<string, Peer>();
   // Background work that close() waits for.
   const tasks = new Set<Promise<unknown>>();
   const tunnelTasks = new Set<Promise<unknown>>();
@@ -267,7 +277,7 @@ export function createProxyServer(options: ServerOptions) {
     const count = throttle.fail(address);
     const wait = throttle.blocked(address);
     console.log(
-      `Sign-in refused from ${address}: wrong service token, ${count} in a row${wait ? `; blocked for ${wait}s` : ''}`,
+      `Sign-in refused from ${address}: invalid credentials, ${count} in a row${wait ? `; blocked for ${wait}s` : ''}`,
     );
   }
 
@@ -323,6 +333,7 @@ export function createProxyServer(options: ServerOptions) {
   });
 
   function send(peer: Peer, message: ServerMessage) {
+    if (peer.released) return;
     const frame = JSON.stringify(message);
     // A dropped connection collects what it misses, up to a limit; past it, it is given up.
     if (peer.resume && !peer.resume.log.record(frame) && peer.detached) {
@@ -363,7 +374,8 @@ export function createProxyServer(options: ServerOptions) {
     const target = [...peers].find(
       (candidate) => candidate.id === connectionId && candidate.resume,
     );
-    const held = target?.resume;
+    const held =
+      target && !target.released && target.deviceId === peer.deviceId ? target.resume : undefined;
     const matches =
       !!held &&
       timingSafeEqual(
@@ -404,9 +416,21 @@ export function createProxyServer(options: ServerOptions) {
     console.log(`Connection ${connectionId.slice(0, 8)} resumed; ${frames.length} frames replayed`);
     return target;
   }
-  function broadcast(message: ServerMessage, sessionId?: string) {
+  function broadcast(message: ServerMessage, sessionId?: string, deviceId?: string) {
+    const scope =
+      deviceId ??
+      (message.type === 'session.updated'
+        ? store.deviceOf(message.session.id)
+        : sessionId
+          ? store.deviceOf(sessionId)
+          : undefined);
     for (const peer of peers) {
-      if (peer.authenticated && (!sessionId || peer.subscriptions.has(sessionId)))
+      if (
+        peer.authenticated &&
+        !peer.released &&
+        (!scope || peer.deviceId === scope) &&
+        (!sessionId || peer.subscriptions.has(sessionId))
+      )
         send(peer, message);
     }
   }
@@ -728,7 +752,10 @@ export function createProxyServer(options: ServerOptions) {
     }
     if (runs.has(command.sessionId))
       throw new DomainError('native_busy', '这个会话正在图形界面里运行，请先结束运行。');
-    if (terminals.size >= MAX_TERMINALS)
+    if (
+      [...terminals.values()].filter((current) => current.owner.deviceId === peer.deviceId)
+        .length >= MAX_TERMINALS
+    )
       throw new DomainError(
         'native_busy',
         `最多同时运行 ${MAX_TERMINALS} 个原生终端，请先结束一个。`,
@@ -741,6 +768,7 @@ export function createProxyServer(options: ServerOptions) {
       sessionId: command.sessionId,
       owner: peer,
       status: 'starting',
+      hookKey: randomBytes(24).toString('base64url'),
       since: new Date().toISOString(),
       profile,
     };
@@ -817,7 +845,7 @@ export function createProxyServer(options: ServerOptions) {
           rows: command.rows,
           env: {
             ...terminalEnvironment(claudeAs(current.profile)),
-            ...hookEnvironment(`${hookAddress}/${current.id}/${hookSecret}`),
+            ...hookEnvironment(`${hookAddress}/${current.id}/${current.hookKey}`),
             ...sessionEnvironment(session.id),
           },
         },
@@ -899,8 +927,9 @@ export function createProxyServer(options: ServerOptions) {
         else await renameSession(command.sessionId, command.title, nativeOptions);
       }
       if (command.type === 'session.delete') {
+        const deviceId = store.deviceOf(command.sessionId);
         store.delete(command.sessionId);
-        broadcast({ type: 'session.deleted', sessionId: command.sessionId });
+        broadcast({ type: 'session.deleted', sessionId: command.sessionId }, undefined, deviceId);
         for (const other of peers) other.subscriptions.delete(command.sessionId);
       } else {
         broadcast({
@@ -1037,16 +1066,15 @@ export function createProxyServer(options: ServerOptions) {
     });
     emit(run, { type: 'run.status', status: 'running', connectionId: run.owner.id });
     run.input?.submit(command.requestId, text);
-    track(
-      options.claude
-        ? native(run)
-        : simulate(run, command as CommandOf<'message.send'>, {
-            stepMs: options.stepMs ?? 110,
-            projectPath: () => store.get(run.sessionId).session.projectPath,
-            emit: (payload) => emit(run, payload),
-            finish: (status, reason) => finish(run, status, reason),
-          }),
-    );
+    run.done = options.claude
+      ? native(run)
+      : simulate(run, command as CommandOf<'message.send'>, {
+          stepMs: options.stepMs ?? 110,
+          projectPath: () => store.get(run.sessionId).session.projectPath,
+          emit: (payload) => emit(run, payload),
+          finish: (status, reason) => finish(run, status, reason),
+        });
+    track(run.done);
   }
   function controlRun(peer: Peer, command: CommandOf<'run.cancel' | 'approval.reply'>) {
     const run = runs.get(command.sessionId);
@@ -1083,6 +1111,12 @@ export function createProxyServer(options: ServerOptions) {
     peer: Peer,
     command: Command,
   ): Promise<string | { archive: string; eof: boolean; exportToken: string } | undefined> {
+    if (peer.released) throw new DomainError('connection_closed', '连接已结束。');
+    if ('sessionId' in command) store.assertDevice(command.sessionId, peer.deviceId);
+    if (command.type === 'session.create' || command.type === 'session.fork') {
+      const existing = store.created(command.requestId);
+      if (existing) store.assertDevice(existing.id, peer.deviceId);
+    }
     switch (command.type) {
       case 'account.status':
       case 'account.login':
@@ -1132,11 +1166,13 @@ export function createProxyServer(options: ServerOptions) {
         }
         return undefined;
       case 'usage.query': {
-        const titles = new Map(store.list().map((session) => [session.id, session.title]));
+        const titles = new Map(
+          store.listForDevice(peer.deviceId).map((session) => [session.id, session.title]),
+        );
         send(peer, {
           type: 'usage.page',
           requestId: command.requestId,
-          ...usage.query(command, (sessionId) => titles.get(sessionId) ?? null),
+          ...usage.query(command, (sessionId) => titles.get(sessionId) ?? null, peer.deviceId),
         });
         return undefined;
       }
@@ -1144,7 +1180,12 @@ export function createProxyServer(options: ServerOptions) {
         publishTerminals(peer);
         return undefined;
       case 'session.create': {
-        const session = store.create(command.requestId, command.title, command.projectPath);
+        const session = store.create(
+          command.requestId,
+          command.title,
+          command.projectPath,
+          peer.deviceId,
+        );
         peer.subscriptions.clear();
         peer.subscriptions.add(session.id);
         broadcast({ type: 'session.updated', session });
@@ -1269,19 +1310,25 @@ export function createProxyServer(options: ServerOptions) {
       : undefined;
   // The first frame must authenticate; a desktop client also asks for its Windows tunnel here. Returns the
   // connection the socket now serves, which is another one when it resumed.
-  function authenticate(peer: Peer, value: unknown): Peer | false {
+  async function authenticate(
+    peer: Peer,
+    value: unknown,
+    verified: () => void,
+  ): Promise<Peer | false> {
     const auth = authSchema.safeParse(value);
-    // Only a wrong token counts against the address: an outdated client holding the right one is not guessing.
+    // Protocol mismatches do not count as guessing; invalid service or device credentials do.
     const token = (value as { token?: unknown } | null)?.token;
     if (typeof token !== 'string' || !authorized(token)) refuse(peer.address);
-    else throttle.succeed(peer.address);
     if (!auth.success || !authorized(auth.data.token)) {
       send(peer, { type: 'connection.error', code: 'unauthorized', message: '认证失败。' });
       peer.socket.close(4001, 'Unauthorized');
       return false;
     }
     // A client of another version is told which version runs here and, if held, the installer to fetch.
-    if (auth.data.protocolVersion !== PROTOCOL_VERSION) {
+    if (
+      ![12, PROTOCOL_VERSION].includes(auth.data.protocolVersion) ||
+      (auth.data.protocolVersion === 12 && auth.data.device)
+    ) {
       send(peer, {
         type: 'connection.error',
         code: 'version_mismatch',
@@ -1292,7 +1339,66 @@ export function createProxyServer(options: ServerOptions) {
       peer.socket.close(4002, 'Version mismatch');
       return false;
     }
+    peer.deviceId = auth.data.device?.id ?? 'legacy';
+    try {
+      if (auth.data.device) store.authenticateDevice(auth.data.device.id, auth.data.device.key);
+    } catch {
+      refuse(peer.address);
+      send(peer, {
+        type: 'connection.error',
+        code: 'device_unauthorized',
+        message: '设备身份验证失败，请使用本设备的身份文件。',
+      });
+      peer.socket.close(4001, 'Device unauthorized');
+      return false;
+    }
+    throttle.succeed(peer.address);
+    verified();
     if (auth.data.resume) return resume(peer, auth.data.resume);
+    if (options.tunnel) {
+      const identified = peer.deviceId !== 'legacy';
+      if (
+        (identified &&
+          (deviceConnections.has('legacy') ||
+            [...peers].some((p) => p !== peer && p.authenticated && p.deviceId === 'legacy'))) ||
+        (!identified &&
+          ([...deviceConnections.keys()].some((id) => id !== 'legacy') ||
+            [...peers].some((p) => p !== peer && p.authenticated && p.deviceId !== 'legacy')))
+      ) {
+        send(peer, {
+          type: 'connection.error',
+          code: 'legacy_device_exclusive',
+          message: '旧客户端仅支持独占模式；多设备接入请先升级旧设备客户端。',
+        });
+        peer.socket.close(4003, 'Legacy device exclusive');
+        return false;
+      }
+    }
+    if (options.tunnel && auth.data.tunnel) {
+      const previous = deviceConnections.get(peer.deviceId);
+      if (previous && !previous.detached) {
+        send(peer, {
+          type: 'connection.error',
+          code: 'device_busy',
+          message: '此设备已有连接或正在清理；请复用原连接或等待清理完成。',
+        });
+        peer.socket.close(4003, 'Device busy');
+        return false;
+      }
+      // Reserve before awaiting cleanup. Late callbacks only release their own reservation.
+      deviceConnections.set(peer.deviceId, peer);
+      if (previous) {
+        clearTimeout(previous.detached);
+        previous.detached = undefined;
+        await release(previous);
+      }
+      if (
+        peer.released ||
+        peer.socket.readyState !== WebSocket.OPEN ||
+        deviceConnections.get(peer.deviceId) !== peer
+      )
+        return false;
+    }
     peer.authenticated = true;
     // Only the relay can wait for its desktop: an frp tunnel ends with its frpc connection.
     const key =
@@ -1304,7 +1410,8 @@ export function createProxyServer(options: ServerOptions) {
         : undefined;
     send(peer, {
       type: 'ready',
-      protocolVersion: PROTOCOL_VERSION,
+      protocolVersion: auth.data.protocolVersion as 12 | typeof PROTOCOL_VERSION,
+      multiDevice: true,
       terminalRecovery: true,
       connectionId: peer.id,
       adapter,
@@ -1312,7 +1419,7 @@ export function createProxyServer(options: ServerOptions) {
       version,
       update: updates?.state,
       client: installer(),
-      sessions: store.list(),
+      sessions: store.listForDevice(peer.deviceId),
       ...(key && { resume: { key, graceMs } }),
     });
     if (key)
@@ -1324,20 +1431,6 @@ export function createProxyServer(options: ServerOptions) {
         }),
       };
     if (auth.data.tunnel && options.tunnel) {
-      // A device that dropped and is waiting to come back gives way to a new sign-in, which is most likely the same
-      // desktop started again. Its relay tunnel shares nothing with the new one, so neither waits for the other.
-      const stale = tunnelOwner?.detached ? tunnelOwner : undefined;
-      if (stale) expire(stale, 'a new connection took the device');
-      if (tunnelOwner && tunnelOwner !== stale) {
-        send(peer, {
-          type: 'connection.error',
-          code: 'device_busy',
-          message: '已有桌面设备连接或正在清理，请稍后重试。',
-        });
-        peer.socket.close(4003, 'Device busy');
-        return peer;
-      }
-      tunnelOwner = peer;
       const relay = auth.data.tunnelTransport === 'relay';
       peer.tunnel = new (relay ? RelayTunnel : WindowsTunnel)(
         options.tunnel,
@@ -1369,9 +1462,19 @@ export function createProxyServer(options: ServerOptions) {
   // A relay connection signs in with the secret its desktop received over the control connection. A wrong secret
   // counts against the address like a wrong token.
   function attachRelay(peer: Peer, attach: TunnelAttach) {
-    const owner = tunnelOwner;
+    const owner = [...peers].find(
+      (candidate) =>
+        candidate.id === attach.connectionId && candidate.authenticated && !candidate.released,
+    );
+    const identityMatches =
+      owner?.deviceId === 'legacy'
+        ? !attach.device
+        : !!attach.device &&
+          attach.device.id === owner?.deviceId &&
+          store.verifyDevice(attach.device.id, attach.device.key);
     if (
       !owner ||
+      !identityMatches ||
       owner.id !== attach.connectionId ||
       !(owner.tunnel instanceof RelayTunnel) ||
       !owner.tunnel.matches(attach.secret)
@@ -1468,29 +1571,36 @@ export function createProxyServer(options: ServerOptions) {
     track(response.then((value) => send(peer, value)));
   }
   // Whatever the connection owned ends with it; nothing is replayed for a later connection.
-  function release(peer: Peer) {
+  function release(peer: Peer): Promise<void> {
+    if (peer.releaseTask) return peer.releaseTask;
+    peer.released = true;
+    peer.authenticated = false;
+    clearTimeout(peer.detached);
+    peer.detached = undefined;
     peers.delete(peer);
     peer.resume?.log.stop();
     if (login?.owner === peer) login.process.cancel();
+    const cleanup: Promise<unknown>[] = [];
     for (const current of terminals.values()) {
       const task = current.owner === peer ? current.process?.close() : undefined;
-      if (task) track(task);
+      if (task) cleanup.push(task);
     }
     for (const run of runs.values())
-      if (run.owner === peer)
+      if (run.owner === peer) {
+        if (run.done) cleanup.push(run.done);
         cancel(
           run,
           options.claude
             ? '连接断开，运行未重放；在途命令结果可能未知。'
             : '连接断开，运行未重放。',
         );
-    if (peer.tunnel)
-      track(
-        peer.tunnel.close().finally(() => {
-          if (tunnelOwner === peer) tunnelOwner = undefined;
-        }),
-        tunnelTasks,
-      );
+      }
+    if (peer.tunnel) cleanup.push(peer.tunnel.close());
+    peer.releaseTask = Promise.allSettled(cleanup).then(() => {
+      if (deviceConnections.get(peer.deviceId) === peer) deviceConnections.delete(peer.deviceId);
+    });
+    track(peer.releaseTask, tunnelTasks);
+    return peer.releaseTask;
   }
 
   wss.on('connection', (socket: WebSocket, address: string) => {
@@ -1501,6 +1611,7 @@ export function createProxyServer(options: ServerOptions) {
       id: randomUUID(),
       address,
       authenticated: false,
+      deviceId: 'legacy',
       registering: false,
       subscriptions: new Set(),
       responses: new Map(),
@@ -1541,15 +1652,26 @@ export function createProxyServer(options: ServerOptions) {
         return;
       }
       if (!peer.authenticated) {
+        if (peer.authenticating || peer.released) return;
         const attach = tunnelAttachSchema.safeParse(value);
-        const next = attach.success
-          ? attachRelay(peer, attach.data) && peer
-          : authenticate(peer, value);
-        if (next) {
-          peer = next;
-          clearTimeout(authTimer);
-          throttle.leave(address);
-        }
+        peer.authenticating = true;
+        const authenticateTask = attach.success
+          ? Promise.resolve<Peer | false>(attachRelay(peer, attach.data) ? peer : false)
+          : authenticate(peer, value, () => clearTimeout(authTimer));
+        track(
+          authenticateTask
+            .then((next) => {
+              if (next) {
+                peer = next;
+                clearTimeout(authTimer);
+                throttle.leave(address);
+              }
+            })
+            .catch(() => socket.close(4002, 'Authentication failed'))
+            .finally(() => {
+              peer.authenticating = false;
+            }),
+        );
         return;
       }
       if (peer.resume) {

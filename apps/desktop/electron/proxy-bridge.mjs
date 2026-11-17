@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { WebSocket, WebSocketServer } from 'ws';
 import { serverMessageSchema, MAX_FRAME_BYTES, ResumeLog } from '@cc-desk-tunnel/protocol';
+import { loadDeviceIdentity } from './device-identity.mjs';
 import { startLinuxTunnel } from './linux-tunnel.mjs';
 import { opened } from './relay.mjs';
 import { startWindowsTunnel } from './windows-tunnel.mjs';
@@ -84,6 +85,9 @@ export async function openProxyBridge(
     throw new Error('原生模式需要不含凭据的 WSS 地址。');
   // A malformed pin is refused here, before anything listens or connects.
   controlTlsOptions(config);
+  const device =
+    binaries.device ??
+    (binaries.devicePath ? await loadDeviceIdentity(binaries.devicePath) : undefined);
   const nonce = randomBytes(32).toString('hex');
   const server = createServer();
   const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_FRAME_BYTES });
@@ -132,7 +136,7 @@ export async function openProxyBridge(
   // desktop, so only Linux keeps its connection through a network drop: the bridge reconnects by itself and the
   // service hands back the runs, terminal and tunnel, replaying the frames each side missed. The client of the
   // bridge sees a pause and a `connection.state` notice, not a new connection.
-  const relay = process.platform === 'linux' || process.platform === 'darwin';
+  const relay = !!device || process.platform === 'linux' || process.platform === 'darwin';
   const failure = (error) =>
     error.code === 'WS_ERR_UNSUPPORTED_MESSAGE_LENGTH'
       ? '会话历史超过 WebSocket 接收上限。'
@@ -196,6 +200,8 @@ export async function openProxyBridge(
         const message = JSON.parse(raw.toString('utf8'));
         if (message.type?.startsWith('tunnel.')) throw new Error('Renderer tunnel message');
         if (message.type === 'auth') {
+          delete message.device;
+          if (device) message.device = device;
           message.tunnel = true;
           message.tunnelTransport = relay ? 'relay' : 'frp';
           message.resumable = relay;
@@ -305,9 +311,11 @@ export async function openProxyBridge(
           return;
         }
         configurationReceived = true;
-        current.preparing = (relay ? startLinuxTunnel : startWindowsTunnel)(
-          message,
-          relay ? { schedulesPath: binaries.schedulesPath, openRelay } : binaries,
+        current.preparing = (
+          process.platform !== 'win32' && relay ? startLinuxTunnel : startWindowsTunnel
+        )(
+          { ...message, ...(device && { device }) },
+          { ...binaries, openRelay },
           current.controller.signal,
           (message) => {
             // A relay refusal during a drop means the old transport expired, not that the conversation did.
@@ -326,6 +334,10 @@ export async function openProxyBridge(
         // The other transport's offer, which this platform did not ask for; it never reaches the renderer.
         fail('隧道方式不匹配。');
       } else if (message.type === 'ready' && message.adapter === 'claude-code') {
+        if (device && !message.multiDevice) {
+          fail('此服务不支持设备身份，请先升级服务端。');
+          return;
+        }
         nativeReady = message;
         release = message.client;
       } else if (message.type === 'tunnel.ready') {

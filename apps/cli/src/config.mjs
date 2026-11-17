@@ -8,6 +8,7 @@ import { join } from 'node:path';
 export function configDirectory(env = process.env) {
   return join(env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'cc-desk-tunnel');
 }
+export const devicePath = (env = process.env) => join(configDirectory(env), 'device.json');
 const configPath = (env) => join(configDirectory(env), 'cli.json');
 const attributes = (url) => ['service', 'cc-desk-tunnel', 'url', url];
 

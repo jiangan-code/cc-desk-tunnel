@@ -182,12 +182,16 @@ export class UsageLog {
       }),
     };
   }
-  query(query: UsageQuery, title: (sessionId: string) => string | null): Page {
+  query(query: UsageQuery, title: (sessionId: string) => string | null, deviceId?: string): Page {
     const conditions = ['at >= ?', 'at < ?'];
     const range: (string | number)[] = [
       query.from ? Date.parse(query.from) : 0,
       query.to ? Date.parse(query.to) : Number.MAX_SAFE_INTEGER,
     ];
+    if (deviceId) {
+      conditions.push('session_id IN (SELECT session_id FROM session_devices WHERE device_id = ?)');
+      range.push(deviceId);
+    }
     const filtered = [...conditions, ...(query.model ? ['model = ?'] : [])].join(' AND ');
     const values = [...range, ...(query.model ? [query.model] : [])];
     const rows = this.database

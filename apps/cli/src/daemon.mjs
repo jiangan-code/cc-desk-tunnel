@@ -10,6 +10,7 @@ import { WebSocket, WebSocketServer } from 'ws';
 import { PROTOCOL_VERSION, serverMessageSchema } from '@cc-desk-tunnel/protocol';
 import { openProxyBridge } from '../../desktop/electron/proxy-bridge.mjs';
 import { newlyWaiting, notify } from './notify.mjs';
+import { devicePath } from './config.mjs';
 import { manageLaunchAgent } from './launchd.mjs';
 
 // The background service keeps this device's connection, and with it the agents, while no terminal shows them.
@@ -97,7 +98,7 @@ export class Hub {
 // Runs the daemon until its service connection ends; resolves with the reason. `stop()` on the returned handle
 // ends it deliberately, which ends the agents.
 export async function startDaemon(
-  { url, fingerprint, token, socketPath = daemonSocket(), resolveProxy },
+  { url, fingerprint, token, socketPath = daemonSocket(), resolveProxy, device },
   log = (text) => console.error(text),
 ) {
   if (process.platform === 'darwin') {
@@ -108,7 +109,10 @@ export async function startDaemon(
       throw new Error('ccdt socket 目录必须属于当前用户且权限为 0700。');
   }
   await clearStaleSocket(socketPath);
-  const bridge = await openProxyBridge({ url, fingerprint }, { resolveProxy });
+  const bridge = await openProxyBridge(
+    { url, fingerprint },
+    { resolveProxy, ...(device ? { device } : { devicePath: devicePath() }) },
+  );
   const upstream = new WebSocket(bridge.url);
   const hub = new Hub((text) => {
     if (upstream.readyState === WebSocket.OPEN) upstream.send(text);

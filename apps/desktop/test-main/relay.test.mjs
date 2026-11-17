@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { execFile } from 'node:child_process';
-import { X509Certificate, randomUUID } from 'node:crypto';
+import { X509Certificate, randomBytes, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { connect, createServer } from 'node:net';
 import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
@@ -489,10 +489,28 @@ test(
     await chmod(executable, 0o755);
     const { url, token, fingerprint } = await service(t, { claude: { executable } });
     const socketPath = join(directory, 'ccdt.sock');
-    const daemon = await startDaemon({ url, fingerprint, token, socketPath }, () => {});
+    const daemon = await startDaemon(
+      {
+        url,
+        fingerprint,
+        token,
+        socketPath,
+        device: { id: randomUUID(), key: randomBytes(32).toString('base64url') },
+      },
+      () => {},
+    );
     t.after(() => daemon.stop());
     await assert.rejects(
-      startDaemon({ url, fingerprint, token, socketPath }, () => {}),
+      startDaemon(
+        {
+          url,
+          fingerprint,
+          token,
+          socketPath,
+          device: { id: randomUUID(), key: randomBytes(32).toString('base64url') },
+        },
+        () => {},
+      ),
       /已在运行/,
       'one daemon per socket',
     );
@@ -593,7 +611,13 @@ test(
     const network = await outage(t, url);
     const notices = [];
     const daemon = await startDaemon(
-      { url: network.url, token, fingerprint, socketPath: join(directory, 'daemon.sock') },
+      {
+        url: network.url,
+        token,
+        fingerprint,
+        socketPath: join(directory, 'daemon.sock'),
+        device: { id: randomUUID(), key: randomBytes(32).toString('base64url') },
+      },
       (text) => notices.push(text),
     );
     t.after(() => daemon.stop());

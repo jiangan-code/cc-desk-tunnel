@@ -42,6 +42,7 @@ for (const name of ['ssh2', 'asn1', 'bcrypt-pbkdf', 'safer-buffer', 'tweetnacl']
   });
 }
 cpSync(join(root, 'scripts/install-cli.mjs'), join(app, 'install.mjs'));
+cpSync(join(root, 'docs/multi-device.md'), join(app, 'multi-device.md'));
 for (const file of ['LICENSE', 'NOTICE']) cpSync(join(root, file), join(app, file));
 writeFileSync(
   join(app, 'README.md'),
