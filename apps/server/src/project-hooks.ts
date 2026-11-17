@@ -29,7 +29,8 @@ export async function terminalHookSettings(
       )
     ).stdout,
 ) {
-  if (ssh.platform !== 'linux' || !trusted.includes(project)) return undefined;
+  if ((ssh.platform !== 'linux' && ssh.platform !== 'darwin') || !trusted.includes(project))
+    return undefined;
   const source = JSON.parse(await fetch());
   const settings = providerPath ? JSON.parse(await readFile(providerPath, 'utf8')) : {};
   const hooks = settings.hooks ?? {};

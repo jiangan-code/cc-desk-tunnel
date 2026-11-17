@@ -1,4 +1,6 @@
-# Linux 终端客户端 `ccdt`
+# Linux / macOS 终端客户端 `ccdt`
+
+Mac 轻量包安装、钥匙串和 launchd 后台运行见 [Mac 终端指南](../../docs/macos-cli.md)。
 
 在你自己的终端里直接使用远端的原版 Claude Code：界面、快捷键和斜杠命令与本地 `claude` 一样，模型和会话在服务端，命令在本机当前目录执行。不需要图形界面和 Electron。
 
@@ -69,6 +71,8 @@ ccdt daemon stop         # 停止（结束它运行的全部 agent）
 ccdt daemon uninstall    # 停止并移除
 ```
 
+macOS 使用 launchd，服务路径和日志见 [Mac 终端指南](../../docs/macos-cli.md)。以下 systemd 运维命令适用于 Linux。
+
 后台服务持有这台设备到服务端的连接和执行通道，在 `$XDG_RUNTIME_DIR/ccdt.sock`（权限 0600）等待 `ccdt`。它在运行时，`ccdt` 只负责显示：按 `q` 或关掉终端，agent 照常运行；任何终端里再运行 `ccdt` 都能接回，进入时还原整屏画面。几个终端可以同时显示不同的 agent；同一个 agent 后打开的终端接管显示。
 
 - 安装前先退出正在运行的 `ccdt`：同一服务同时只接受一台执行设备。
@@ -104,7 +108,7 @@ npm run install:cli      # 在 ~/.local/bin 放一个绑定本源码目录和当
 ccdt login               # 服务地址、证书指纹默认取自桌面客户端的保存值；凭据不回显
 ```
 
-服务凭据优先存入系统密钥环（`secret-tool`，GNOME Keyring / KWallet）；密钥环不可用时存入 `~/.config/cc-desk-tunnel/cli.json`，权限 0600。也可以不保存，用 `CCDT_TOKEN` 环境变量提供。脚本化登录：`ccdt login --url wss://… --fingerprint … --token-stdin < token.txt`。
+macOS 的服务凭据存入登录钥匙串，失败时提示解锁后重试。Linux 的服务凭据优先存入系统密钥环（`secret-tool`，GNOME Keyring / KWallet）；密钥环不可用时存入 `~/.config/cc-desk-tunnel/cli.json`，权限 0600。也可以不保存，用 `CCDT_TOKEN` 环境变量提供。脚本化登录：`ccdt login --url wss://… --fingerprint … --token-stdin < token.txt`。
 
 ## 工作方式
 

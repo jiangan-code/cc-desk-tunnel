@@ -668,7 +668,7 @@ export const tunnelCredentialsSchema = z
     privateKey: z.string().min(1).max(16384),
     hostPublicKey: z.string().regex(/^ssh-ed25519 [A-Za-z0-9+/=]+$/),
     powershellPath: z.string().min(1).max(2048),
-    platform: z.enum(['win32', 'linux']).optional(),
+    platform: z.enum(['win32', 'linux', 'darwin']).optional(),
     schedulesPath: z.string().min(1).max(4096).optional(),
   })
   .strict();

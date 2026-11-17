@@ -2,6 +2,8 @@
 
 **简体中文** | [English](README.en.md)
 
+> macOS（Apple Silicon arm64）使用轻量终端版 `ccdt`，安装步骤见 [Mac 终端指南](docs/macos-cli.md)。
+
 > Linux 桌面适配：Ubuntu 26.04 LTS x86_64 已加入 Bash 执行通道和 deb 打包。构建、安装与协议升级见 [Linux 桌面指南](docs/linux-desktop.md)。
 
 用桌面客户端驱动云端的 Claude Code，经反向隧道在你的 Windows 本机执行。

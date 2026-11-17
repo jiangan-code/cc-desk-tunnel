@@ -10,6 +10,28 @@ export function acceptedEnvironment(key, value) {
     : null;
 }
 
+// Finder-launched applications do not inherit a terminal's PATH. Keep standard macOS
+// tools and Apple Silicon Homebrew available without running interactive shell setup.
+export function commandEnvironment(
+  env = process.env,
+  platform = process.platform,
+  home = homedir(),
+) {
+  if (platform !== 'darwin') return { ...env };
+  return {
+    ...env,
+    PATH: [
+      ...new Set([
+        `${home}/.local/bin`,
+        '/opt/homebrew/bin',
+        '/opt/homebrew/sbin',
+        '/usr/local/bin',
+        ...(env.PATH ?? '/usr/bin:/bin:/usr/sbin:/sbin').split(':'),
+      ]),
+    ].join(':'),
+  };
+}
+
 // A per-connection SSH exec endpoint, owned by the desktop user. No password,
 // forwarding, PTY, SFTP or interactive shell is exposed.
 export async function startLinuxSsh() {
@@ -51,7 +73,7 @@ export async function startLinuxSsh() {
       client.on('session', (accept) => {
         const session = accept();
         // Never inherited from this process, so a command that did not send it has none.
-        const { CCDT_REMOTE_SESSION_ID: _inherited, ...env } = process.env;
+        const { CCDT_REMOTE_SESSION_ID: _inherited, ...env } = commandEnvironment();
         session.on('env', (accept, reject, info) => {
           const entry = acceptedEnvironment(info.key, info.val);
           if (entry) env[entry[0]] = entry[1];

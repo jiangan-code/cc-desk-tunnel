@@ -97,3 +97,20 @@ test('serializes refreshes sharing a native history directory', async (t) => {
   await Promise.all([first, second]);
   assert.deepEqual(await readdir(join(root, '.claude', 'skills')), ['new']);
 });
+
+test('macOS skills use desktop POSIX paths and preserve spaces in their wrappers', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'ccdt-mac-skills-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const project = "/Users/user/中文 project's";
+  const mac = { ...ssh, platform: 'darwin' as const };
+  assert.match(skillListCommand(project, mac), /^bash -c /);
+  await refreshProjectSkills(
+    root,
+    project,
+    mac,
+    async () => `one\t${Buffer.from('name: one\ndescription: mac skill').toString('base64')}\n`,
+  );
+  const wrapper = await readFile(join(root, '.claude/skills/one/SKILL.md'), 'utf8');
+  assert.ok(wrapper.includes(`${project}/.claude/skills/one/SKILL.md`));
+  assert.doesNotMatch(wrapper, /PowerShell/);
+});

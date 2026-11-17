@@ -132,7 +132,7 @@ export async function openProxyBridge(
   // desktop, so only Linux keeps its connection through a network drop: the bridge reconnects by itself and the
   // service hands back the runs, terminal and tunnel, replaying the frames each side missed. The client of the
   // bridge sees a pause and a `connection.state` notice, not a new connection.
-  const relay = process.platform === 'linux';
+  const relay = process.platform === 'linux' || process.platform === 'darwin';
   const failure = (error) =>
     error.code === 'WS_ERR_UNSUPPORTED_MESSAGE_LENGTH'
       ? '会话历史超过 WebSocket 接收上限。'
@@ -199,7 +199,12 @@ export async function openProxyBridge(
           message.tunnel = true;
           message.tunnelTransport = relay ? 'relay' : 'frp';
           message.resumable = relay;
-          message.deviceName = process.platform === 'linux' ? 'Linux desktop' : 'Windows desktop';
+          message.deviceName =
+            process.platform === 'darwin'
+              ? 'macOS desktop'
+              : process.platform === 'linux'
+                ? 'Linux desktop'
+                : 'Windows desktop';
           token = String(message.token);
           auth = message;
           if (relay)

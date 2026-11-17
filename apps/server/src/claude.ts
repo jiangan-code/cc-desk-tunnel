@@ -39,11 +39,16 @@ export type ClaudeRun = {
 };
 // `sessionId` is the proxy's name for the session, which a scheduled task needs to continue it.
 export function remotePrompt(projectPath: string, ssh: SshConnection, sessionId: string) {
-  if (ssh.platform === 'linux')
+  if (ssh.platform === 'linux' || ssh.platform === 'darwin')
     return [
-      'The user projects are on the connected Linux desktop, NOT this agent host.',
+      `The user projects are on the connected ${ssh.platform === 'darwin' ? 'macOS' : 'Linux'} desktop, NOT this agent host.`,
       `Project cwd on the desktop: ${JSON.stringify(projectPath)}. Shell: /bin/bash. Encoding: UTF-8.`,
-      `Use native Bash to run ssh -F ${JSON.stringify(ssh.configPath)} windows '<remote command>'. The alias windows is retained for compatibility and targets the Linux desktop.`,
+      `Use native Bash to run ssh -F ${JSON.stringify(ssh.configPath)} windows '<remote command>'. The alias windows is retained for compatibility and targets the connected desktop.`,
+      ...(ssh.platform === 'darwin'
+        ? [
+            'The desktop runs macOS with BSD utilities and Apple system Bash. Do not assume GNU flags, apt, or Linux-only paths. Homebrew on Apple Silicon is under /opt/homebrew.',
+          ]
+        : []),
       'Use SSH for ALL project reads, edits, searches and commands. Never fall back to files on this agent host.',
       `Begin remote scripts with cd -- '${projectPath.replaceAll("'", "'\\''")}' && ...; quote shell arguments safely.`,
       'SSH uses a temporary identity and pinned host key. Never disclose or copy the private key.',

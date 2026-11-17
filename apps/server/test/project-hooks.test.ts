@@ -101,3 +101,26 @@ test('bridge passes input, output and hook exit including rewake; reports discon
   assert.equal(disconnected.code, 2);
   assert.match(disconnected.err, /disconnected.*SSH transport failed/s);
 });
+
+test('trusted macOS project hooks run through the desktop bridge with project quoting', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'ccdt-mac-hooks-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const project = "/Users/user/中文 project's";
+  const output = join(root, 'settings.json');
+  await terminalHookSettings(
+    project,
+    { ...ssh, platform: 'darwin' },
+    [project],
+    undefined,
+    output,
+    async () =>
+      JSON.stringify({
+        hooks: { Stop: [{ hooks: [{ type: 'command', command: 'printf done' }] }] },
+      }),
+  );
+  const settings = JSON.parse(await readFile(output, 'utf8'));
+  const command = settings.hooks.Stop[0].hooks[0].command;
+  assert.match(command, /hook-bridge/);
+  assert.match(command, /Users\/user/);
+  assert.match(command, /printf done/);
+});

@@ -8,6 +8,7 @@ import {
   commandSchema,
   eventSchema,
   terminalControlSchema,
+  tunnelCredentialsSchema,
 } from '../src/index.ts';
 
 test('protocol validates UTF-8 text, IDs and bounded input', () => {
@@ -156,6 +157,23 @@ test('account tokens extend the protocol without changing its version', () => {
       profile: 'work',
       token: 'sessionKey',
     }).success,
+    false,
+  );
+});
+
+test('tunnel credentials explicitly recognize macOS and reject unknown platforms', () => {
+  const credentials = {
+    type: 'tunnel.credentials',
+    connectionId: randomUUID(),
+    username: 'mac-user',
+    privateKey: 'test-only',
+    hostPublicKey: 'ssh-ed25519 AAAATEST',
+    powershellPath: '/bin/bash',
+    platform: 'darwin',
+  };
+  assert.equal(tunnelCredentialsSchema.parse(credentials).platform, 'darwin');
+  assert.equal(
+    tunnelCredentialsSchema.safeParse({ ...credentials, platform: 'unknown' }).success,
     false,
   );
 });

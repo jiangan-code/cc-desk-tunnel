@@ -1,7 +1,7 @@
 import { startLinuxSsh } from './linux-ssh.mjs';
 import { startRelay } from './relay.mjs';
 
-// The Linux desktop's side of the tunnel: a per-connection SSH endpoint reached through the service's WSS relay.
+// The Linux/macOS desktop's side of the tunnel: a per-connection SSH endpoint reached through the service's WSS relay.
 // No tunnel program or extra port is involved.
 export async function startLinuxTunnel(configuration, binaries, signal, onFailure) {
   let ssh, relay, closing;
@@ -24,7 +24,7 @@ export async function startLinuxTunnel(configuration, binaries, signal, onFailur
       credentials: {
         type: 'tunnel.credentials',
         connectionId: configuration.connectionId,
-        platform: 'linux',
+        platform: process.platform === 'darwin' ? 'darwin' : 'linux',
         username: ssh.username,
         privateKey: ssh.privateKey,
         hostPublicKey: ssh.hostPublicKey,

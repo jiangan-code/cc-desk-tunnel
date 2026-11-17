@@ -6,7 +6,7 @@ import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import ssh2 from 'ssh2';
-import { acceptedEnvironment, startLinuxSsh } from '../electron/linux-ssh.mjs';
+import { acceptedEnvironment, commandEnvironment, startLinuxSsh } from '../electron/linux-ssh.mjs';
 import { pathKey, withProject, folderName, isInside } from '../src/paths.ts';
 const execute = promisify(execFile);
 
@@ -25,7 +25,7 @@ test('Linux paths preserve case and backslashes without breaking Windows paths',
 
 test(
   'Linux SSH authenticates temporary key, executes Bash and refuses passwords/other keys',
-  { skip: process.platform !== 'linux' },
+  { skip: !['linux', 'darwin'].includes(process.platform) },
   async (t) => {
     const server = await startLinuxSsh();
     const directory = await mkdtemp(join(tmpdir(), 'linux-ssh-test-'));
@@ -96,7 +96,7 @@ test(
 
 test(
   'closing Linux SSH kills an active command process group and releases the listener',
-  { skip: process.platform !== 'linux' },
+  { skip: !['linux', 'darwin'].includes(process.platform) },
   async (t) => {
     const server = await startLinuxSsh();
     const client = new ssh2.Client();
@@ -135,7 +135,7 @@ test('Linux SSH takes only the session id from the service', () => {
 
 test(
   'Linux SSH hands the sending session to the command, and nothing else',
-  { skip: process.platform !== 'linux' },
+  { skip: !['linux', 'darwin'].includes(process.platform) },
   async (t) => {
     const server = await startLinuxSsh();
     const directory = await mkdtemp(join(tmpdir(), 'linux-ssh-env-test-'));
@@ -183,3 +183,20 @@ test(
     assert.equal(await run({ CCDT_REMOTE_SESSION_ID: 'forged' }), 'unset|unset');
   },
 );
+
+test('Finder command environment includes Apple Silicon Homebrew without dropping user tools', () => {
+  const original = { PATH: '/custom/bin:/usr/bin:/opt/homebrew/bin', LANG: 'en_US.UTF-8' };
+  const env = commandEnvironment(original, 'darwin', '/Users/test user');
+  assert.equal(env.LANG, original.LANG);
+  assert.deepEqual(env.PATH.split(':'), [
+    '/Users/test user/.local/bin',
+    '/opt/homebrew/bin',
+    '/opt/homebrew/sbin',
+    '/usr/local/bin',
+    '/custom/bin',
+    '/usr/bin',
+  ]);
+  assert.equal(original.PATH, '/custom/bin:/usr/bin:/opt/homebrew/bin');
+  assert.deepEqual(commandEnvironment(original, 'linux'), original);
+  assert.ok(commandEnvironment({}, 'darwin', '/Users/test').PATH.includes('/bin'));
+});

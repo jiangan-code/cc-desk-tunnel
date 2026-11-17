@@ -16,7 +16,7 @@ import { startLinuxTunnel } from '../electron/linux-tunnel.mjs';
 const execute = promisify(execFile);
 // The daemon tests must not put notifications on the desktop.
 process.env.CCDT_NOTIFY = '0';
-const linux = { skip: process.platform !== 'linux', timeout: 60000 };
+const linux = { skip: !['linux', 'darwin'].includes(process.platform), timeout: 60000 };
 
 async function certificate(directory) {
   const keyPath = join(directory, 'key.pem');
@@ -128,7 +128,11 @@ test(
       results.map((result) => result.stdout.toString()),
       ['0', '1', '2', '3', '4', '5'],
     );
-    const large = await ssh(dataDir, connectionId, 'head -c 8388608 /dev/zero | tr "\\0" a');
+    const large = await ssh(
+      dataDir,
+      connectionId,
+      'dd if=/dev/zero bs=1048576 count=8 2>/dev/null | tr "\\0" a',
+    );
     assert.equal(large.stdout.length, 8 * 1024 * 1024);
     assert.equal(
       large.stdout.every((byte) => byte === 0x61),
