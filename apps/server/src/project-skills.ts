@@ -13,7 +13,7 @@ const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 
 // Only the name and description fields cross SSH; neither the body nor other frontmatter is transferred.
 export function skillListCommand(projectPath: string, ssh: SshConnection) {
-  if (ssh.platform === 'linux') {
+  if (ssh.platform === 'linux' || ssh.platform === 'darwin') {
     const script = `for d in "$1"/.claude/skills/*; do
   [ -f "$d/SKILL.md" ] || continue
   n=\${d##*/}
@@ -121,7 +121,7 @@ async function writeWrappers(
     }
     await writeFile(join(dir, marker), 'ccdt\n', { mode: 0o600 });
     const skillPath =
-      ssh.platform === 'linux'
+      ssh.platform === 'linux' || ssh.platform === 'darwin'
         ? `${projectPath.replace(/\/$/, '')}/.claude/skills/${directory}/SKILL.md`
         : `${projectPath.replace(/[\\/]$/, '')}\\.claude\\skills\\${directory}\\SKILL.md`;
     const text = `---\nname: ${skillName}\ndescription: ${JSON.stringify(description)}\n---\n\nRead the complete skill file ${JSON.stringify(skillPath)} on the desktop over SSH using the session's remote-work instructions. Follow that file and read any referenced files on the desktop over SSH. Pass the user's arguments to the skill.\n`;

@@ -3,23 +3,23 @@ import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-// Connection details follow the XDG layout. The service token goes to the Secret Service (GNOME Keyring, KWallet)
-// through secret-tool when one answers, and only otherwise into the config file, which only the user can read.
+// Connection details follow XDG. macOS stores tokens in Keychain; Linux uses
+// Secret Service with a private-file fallback.
 export function configDirectory(env = process.env) {
   return join(env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'cc-desk-tunnel');
 }
+export const devicePath = (env = process.env) => join(configDirectory(env), 'device.json');
 const configPath = (env) => join(configDirectory(env), 'cli.json');
 const attributes = (url) => ['service', 'cc-desk-tunnel', 'url', url];
 
-// Runs secret-tool; null when it is missing or the keyring refuses, so callers fall back to the file.
-export function secretTool(args, input, env = process.env) {
+// Secret values travel through stdin, never in a process's argument list.
+function runSecret(executable, args, input, env) {
   return new Promise((resolve) => {
-    let child;
-    try {
-      child = spawn('secret-tool', args, { env, stdio: ['pipe', 'pipe', 'ignore'] });
-    } catch {
-      return resolve(null);
-    }
+    const child = spawn(executable, args, {
+      env,
+      stdio: ['pipe', 'pipe', 'ignore'],
+      timeout: 30000,
+    });
     let output = '';
     child.stdout.setEncoding('utf8').on('data', (chunk) => (output += chunk));
     child.once('error', () => resolve(null));
@@ -29,7 +29,38 @@ export function secretTool(args, input, env = process.env) {
   });
 }
 
-export async function loadConfig(env = process.env, secrets = secretTool) {
+export function secretTool(args, input, env = process.env) {
+  return runSecret('secret-tool', args, input, env);
+}
+
+// security's interactive parser accepts quoted arguments and backslash escapes.
+// One command followed by EOF preserves its exit status; a trailing "quit" would hide failures.
+export async function macSecrets(args, input, env = process.env, run = runSecret) {
+  const action = args[0];
+  const account = args.at(-1);
+  const match = ['-s', 'cc-desk-tunnel', '-a', account];
+  if (action === 'lookup')
+    return run('/usr/bin/security', ['find-generic-password', ...match, '-w'], '', env);
+  if (action === 'clear')
+    return run('/usr/bin/security', ['delete-generic-password', ...match], '', env);
+  if (action !== 'store') return null;
+  const values = ['add-generic-password', '-U', ...match, '-w', input];
+  if (values.some((value) => typeof value !== 'string' || /[\r\n\0]/.test(value))) return null;
+  const line =
+    values.map((value) => `"${value.replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`).join(' ') +
+    '\n';
+  if (Buffer.byteLength(line) >= 4096) return null;
+  const result = await run('/usr/bin/security', ['-i'], line, env);
+  if (result === null) return null;
+  // Verify the complete value before removing any existing file-based credential.
+  const saved = await run('/usr/bin/security', ['find-generic-password', ...match, '-w'], '', env);
+  return saved?.replace(/\r?\n$/, '') === input ? '' : null;
+}
+
+const systemSecrets = (...args) =>
+  (process.platform === 'darwin' ? macSecrets : secretTool)(...args);
+
+export async function loadConfig(env = process.env, secrets = systemSecrets) {
   let saved;
   try {
     saved = JSON.parse(await readFile(configPath(env), 'utf8'));
@@ -50,7 +81,8 @@ export async function loadConfig(env = process.env, secrets = secretTool) {
 export async function saveConfig(
   { url, fingerprint, token },
   env = process.env,
-  secrets = secretTool,
+  secrets = systemSecrets,
+  platform = process.platform,
 ) {
   const stored =
     (await secrets(
@@ -58,6 +90,8 @@ export async function saveConfig(
       token,
       env,
     )) !== null;
+  if (!stored && platform === 'darwin')
+    throw new Error('macOS 钥匙串无法保存凭据；请解锁登录钥匙串后重试。');
   const directory = configDirectory(env);
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const temporary = `${configPath(env)}.tmp`;
@@ -70,7 +104,7 @@ export async function saveConfig(
   return stored ? 'keyring' : 'file';
 }
 
-export async function clearConfig(env = process.env, secrets = secretTool) {
+export async function clearConfig(env = process.env, secrets = systemSecrets) {
   const saved = await loadConfig({ ...env, CCDT_TOKEN: '' }, async () => '').catch(() => null);
   if (saved) await secrets(['clear', ...attributes(saved.url)], '', env);
   await rm(configPath(env), { force: true });

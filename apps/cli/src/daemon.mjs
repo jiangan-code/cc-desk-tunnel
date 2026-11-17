@@ -1,20 +1,26 @@
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { chmod, mkdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { connect } from 'node:net';
 import { homedir, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import { WebSocket, WebSocketServer } from 'ws';
 import { PROTOCOL_VERSION, serverMessageSchema } from '@cc-desk-tunnel/protocol';
 import { openProxyBridge } from '../../desktop/electron/proxy-bridge.mjs';
 import { newlyWaiting, notify } from './notify.mjs';
+import { devicePath } from './config.mjs';
+import { manageLaunchAgent } from './launchd.mjs';
 
 // The background service keeps this device's connection, and with it the agents, while no terminal shows them.
 // Terminals reach it over a Unix socket only the user can open, and speak the service's own protocol to it.
 export const daemonSocket = (env = process.env) =>
-  join(env.XDG_RUNTIME_DIR || tmpdir(), 'ccdt.sock');
+  join(
+    env.XDG_RUNTIME_DIR ||
+      (process.platform === 'darwin' ? `/tmp/ccdt-${process.getuid()}` : tmpdir()),
+    'ccdt.sock',
+  );
 
 // Shares one service connection among the terminals connected to the daemon. Each request's frames go back to the
 // terminal that sent it, a terminal's output to the one that opened it last, everything else to all. A terminal that
@@ -92,11 +98,21 @@ export class Hub {
 // Runs the daemon until its service connection ends; resolves with the reason. `stop()` on the returned handle
 // ends it deliberately, which ends the agents.
 export async function startDaemon(
-  { url, fingerprint, token, socketPath = daemonSocket(), resolveProxy },
+  { url, fingerprint, token, socketPath = daemonSocket(), resolveProxy, device },
   log = (text) => console.error(text),
 ) {
+  if (process.platform === 'darwin') {
+    const directory = dirname(socketPath);
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    const info = await lstat(directory);
+    if (!info.isDirectory() || info.uid !== process.getuid() || info.mode & 0o077)
+      throw new Error('ccdt socket 目录必须属于当前用户且权限为 0700。');
+  }
   await clearStaleSocket(socketPath);
-  const bridge = await openProxyBridge({ url, fingerprint }, { resolveProxy });
+  const bridge = await openProxyBridge(
+    { url, fingerprint },
+    { resolveProxy, ...(device ? { device } : { devicePath: devicePath() }) },
+  );
   const upstream = new WebSocket(bridge.url);
   const hub = new Hub((text) => {
     if (upstream.readyState === WebSocket.OPEN) upstream.send(text);
@@ -248,6 +264,7 @@ export function unitFile({
 }
 const systemctl = (...args) => promisify(execFile)('systemctl', ['--user', ...args]);
 export async function installDaemon() {
+  if (process.platform === 'darwin') return manageLaunchAgent('install');
   const path = unitPath();
   await mkdir(join(path, '..'), { recursive: true });
   await writeFile(path, unitFile());
@@ -258,12 +275,15 @@ export async function installDaemon() {
   return path;
 }
 export async function uninstallDaemon() {
+  if (process.platform === 'darwin') return manageLaunchAgent('uninstall');
   await systemctl('disable', '--now', UNIT).catch(() => {});
   await rm(unitPath(), { force: true });
   await systemctl('daemon-reload');
 }
-export const stopDaemon = () => systemctl('stop', UNIT);
+export const stopDaemon = () =>
+  process.platform === 'darwin' ? manageLaunchAgent('stop') : systemctl('stop', UNIT);
 export async function daemonStatus() {
+  if (process.platform === 'darwin') return manageLaunchAgent('status');
   const { stdout } = await systemctl('is-active', UNIT).catch((error) => error);
   return String(stdout ?? '').trim() || 'inactive';
 }

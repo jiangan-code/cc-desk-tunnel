@@ -100,3 +100,25 @@ test('Linux context without a scheduler does not point at one', () => {
   assert.doesNotMatch(prompt, /undefined|schedules/);
   assert.match(prompt, /no scheduled prompts/);
 });
+
+test('macOS targets desktop Bash with BSD tools, session forwarding and SSH multiplexing', () => {
+  const files = sshConfig('/data/connections/mac', 32123, 'user', 'ssh-ed25519 AAAATEST', 'darwin');
+  assert.match(files.config, /ControlMaster auto/);
+  assert.match(files.config, /ConnectTimeout 30/);
+  assert.match(files.config, /SendEnv CCDT_SESSION_ID/);
+  const prompt = remotePrompt(
+    "/Users/user/中文 project's",
+    {
+      configPath: '/private/ssh_config',
+      powershellPath: '/bin/bash',
+      platform: 'darwin',
+      schedulesPath: '/Users/user/Library/Application Support/CC Desk Tunnel/schedules.json',
+    },
+    'session-id',
+  );
+  assert.match(prompt, /connected macOS desktop/);
+  assert.match(prompt, /BSD utilities/);
+  assert.match(prompt, /Shell: \/bin\/bash/);
+  assert.match(prompt, /Library\/Application Support/);
+  assert.doesNotMatch(prompt, /PowerShell|connected Linux desktop/);
+});

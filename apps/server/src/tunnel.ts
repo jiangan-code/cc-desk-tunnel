@@ -21,7 +21,7 @@ export type TunnelOffer = Extract<ServerMessage, { type: 'tunnel.configure' | 't
 export type SshConnection = {
   configPath: string;
   powershellPath: string;
-  platform?: 'win32' | 'linux';
+  platform?: 'win32' | 'linux' | 'darwin';
   schedulesPath?: string;
 };
 
@@ -59,7 +59,7 @@ export function sshProbe(configPath: string, powershellPath: string, platform = 
     "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); Write-Output 'CC_DESK_TUNNEL_SSH_READY'; exit 0";
   const encoded = Buffer.from(script, 'utf16le').toString('base64');
   const command =
-    platform === 'linux'
+    platform === 'linux' || platform === 'darwin'
       ? 'printf CC_DESK_TUNNEL_SSH_READY'
       : `"${powershellPath.replaceAll('"', '')}" -NoLogo -NoProfile -NonInteractive -EncodedCommand ${encoded}`;
   return new Promise<void>((resolve, reject) => {
@@ -69,7 +69,7 @@ export function sshProbe(configPath: string, powershellPath: string, platform = 
       { timeout: 12000, maxBuffer: 65536 },
       (error, stdout) => {
         if (error || !stdout.includes('CC_DESK_TUNNEL_SSH_READY'))
-          reject(new Error('Windows SSH / PowerShell probe failed.'));
+          reject(new Error('Desktop SSH / shell probe failed.'));
         else resolve();
       },
     );
@@ -88,7 +88,7 @@ export function sshConfig(
   // desktop: one connection carries every command, which then costs a channel instead (about 0.4 s instead of 1.5 s
   // on a distant service). It ends with the tunnel's relay. The socket path must fit in sun_path.
   const control = join(directory, 'cm');
-  const linux = platform === 'linux';
+  const linux = platform === 'linux' || platform === 'darwin';
   const multiplex =
     linux && Buffer.byteLength(control) < 100
       ? ['  ControlMaster auto', `  ControlPath "${control}"`, '  ControlPersist yes']

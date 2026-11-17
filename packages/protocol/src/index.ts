@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-export const PROTOCOL_VERSION = 12;
+export const PROTOCOL_VERSION = 13;
 export const MAX_FRAME_BYTES = 256 * 1024;
 const id = z.uuid();
 const timestamp = z.iso.datetime();
@@ -517,6 +517,8 @@ export const terminalControlSchema = z.discriminatedUnion('type', [
 export type TerminalControl = z.infer<typeof terminalControlSchema>;
 // The secret that lets a client take back a connection the network dropped, and a count of frames.
 const resumeKey = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
+export const deviceIdentitySchema = z.object({ id, key: resumeKey }).strict();
+export type DeviceIdentity = z.infer<typeof deviceIdentitySchema>;
 const frameCount = z.number().int().nonnegative();
 export const authSchema = z
   .object({
@@ -525,6 +527,7 @@ export const authSchema = z
     protocolVersion: z.number().int().positive(),
     token: z.string().min(24).max(512),
     deviceName: z.string().trim().min(1).max(120),
+    device: deviceIdentitySchema.optional(),
     tunnel: z.boolean().default(false),
     // How the service reaches the desktop's SSH endpoint: through frp and its own port, or relayed over further WSS
     // connections the desktop opens to this service, which needs neither.
@@ -548,7 +551,12 @@ const relaySecret = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
 // The first and only protocol frame of a relay connection. The service answers with RELAY_BEGIN when it hands the
 // connection an SSH connection; from then on it carries that connection's bytes as binary frames.
 export const tunnelAttachSchema = z
-  .object({ type: z.literal('tunnel.attach'), connectionId: id, secret: relaySecret })
+  .object({
+    type: z.literal('tunnel.attach'),
+    connectionId: id,
+    secret: relaySecret,
+    device: deviceIdentitySchema.optional(),
+  })
   .strict();
 export type TunnelAttach = z.infer<typeof tunnelAttachSchema>;
 export const RELAY_BEGIN = JSON.stringify({ type: 'tunnel.begin' });
@@ -570,7 +578,8 @@ export type TerminalInfo = z.infer<typeof terminalInfoSchema>;
 export const serverMessageSchema = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('ready'),
-    protocolVersion: z.literal(PROTOCOL_VERSION),
+    protocolVersion: z.union([z.literal(12), z.literal(PROTOCOL_VERSION)]),
+    multiDevice: z.boolean().optional(),
     connectionId: id,
     adapter: z.enum(['simulation', 'claude-code']),
     model: z.string().optional(),
@@ -668,7 +677,7 @@ export const tunnelCredentialsSchema = z
     privateKey: z.string().min(1).max(16384),
     hostPublicKey: z.string().regex(/^ssh-ed25519 [A-Za-z0-9+/=]+$/),
     powershellPath: z.string().min(1).max(2048),
-    platform: z.enum(['win32', 'linux']).optional(),
+    platform: z.enum(['win32', 'linux', 'darwin']).optional(),
     schedulesPath: z.string().min(1).max(4096).optional(),
   })
   .strict();

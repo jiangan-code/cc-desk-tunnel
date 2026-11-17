@@ -1,13 +1,20 @@
 import { chmod, mkdir, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 // Puts `ccdt` on the user's PATH as a small launcher bound to this checkout and to the Node that ran this script,
 // so it works from shells that do not load a Node version manager. Nothing outside ~/.local/bin is changed.
-if (process.platform !== 'linux') throw new Error('The terminal client is for Linux.');
+if (!['linux', 'darwin'].includes(process.platform))
+  throw new Error('The terminal client requires Linux or macOS.');
 const quote = (value) => `'${value.replaceAll("'", `'\\''`)}'`;
-const entry = fileURLToPath(new URL('../apps/cli/bin/ccdt.mjs', import.meta.url));
+const entry = fileURLToPath(
+  new URL(
+    existsSync(new URL('./ccdt.mjs', import.meta.url)) ? './ccdt.mjs' : '../apps/cli/bin/ccdt.mjs',
+    import.meta.url,
+  ),
+);
 const directory = process.env.CCDT_BIN_DIR ?? join(homedir(), '.local/bin');
 const target = join(directory, 'ccdt');
 await mkdir(directory, { recursive: true });

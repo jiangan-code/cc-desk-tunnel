@@ -2,6 +2,8 @@
 
 **简体中文** | [English](README.en.md)
 
+> macOS（Apple Silicon arm64）使用轻量终端版 `ccdt`，安装步骤见 [Mac 终端指南](docs/macos-cli.md)。
+
 > Linux 桌面适配：Ubuntu 26.04 LTS x86_64 已加入 Bash 执行通道和 deb 打包。构建、安装与协议升级见 [Linux 桌面指南](docs/linux-desktop.md)。
 
 用桌面客户端驱动云端的 Claude Code，经反向隧道在你的 Windows 本机执行。
@@ -125,7 +127,7 @@ sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/sun168567/cc-desk-t
 
 ## 使用边界
 
-- **单用户自用。** 一个服务对应一个使用者、同一时间一台在线的 Windows 设备。没有多用户、权限分级或租户隔离，也不打算做。
+- **单用户自用。** 一个服务对应一个使用者、支持多台带独立设备身份的 Linux / macOS ccdt 同时在线（见[多设备指南](docs/multi-device.md)）。没有多用户、权限分级或租户隔离，也不打算做。
 - **不改官方本体，不做对抗。** 不含任何针对风控或检测的规避设计，也不以突破服务的地区限制为目的。
 
 ## 文档

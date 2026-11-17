@@ -8,6 +8,7 @@ import {
   commandSchema,
   eventSchema,
   terminalControlSchema,
+  tunnelCredentialsSchema,
 } from '../src/index.ts';
 
 test('protocol validates UTF-8 text, IDs and bounded input', () => {
@@ -56,7 +57,7 @@ test('terminal account selection is optional, bounded and incremental', () => {
     cols: 80,
     rows: 24,
   };
-  assert.equal(PROTOCOL_VERSION, 12);
+  assert.equal(PROTOCOL_VERSION, 13);
   assert.equal(commandSchema.safeParse(command).success, true);
   for (const profile of ['default', 'work-2', 'a_b', 'a'.repeat(32)])
     assert.equal(commandSchema.parse({ ...command, profile }).type, 'terminal.open');
@@ -137,7 +138,7 @@ test('resume logs bound UTF-8 bytes on both peers and refuse replay across evict
 
 test('account tokens extend the protocol without changing its version', () => {
   const requestId = randomUUID();
-  assert.equal(PROTOCOL_VERSION, 12);
+  assert.equal(PROTOCOL_VERSION, 13);
   assert.ok(
     commandSchema.safeParse({
       type: 'account.token.set',
@@ -156,6 +157,23 @@ test('account tokens extend the protocol without changing its version', () => {
       profile: 'work',
       token: 'sessionKey',
     }).success,
+    false,
+  );
+});
+
+test('tunnel credentials explicitly recognize macOS and reject unknown platforms', () => {
+  const credentials = {
+    type: 'tunnel.credentials',
+    connectionId: randomUUID(),
+    username: 'mac-user',
+    privateKey: 'test-only',
+    hostPublicKey: 'ssh-ed25519 AAAATEST',
+    powershellPath: '/bin/bash',
+    platform: 'darwin',
+  };
+  assert.equal(tunnelCredentialsSchema.parse(credentials).platform, 'darwin');
+  assert.equal(
+    tunnelCredentialsSchema.safeParse({ ...credentials, platform: 'unknown' }).success,
     false,
   );
 });

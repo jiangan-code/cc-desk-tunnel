@@ -1,4 +1,6 @@
-# Linux 终端客户端 `ccdt`
+# Linux / macOS 终端客户端 `ccdt`
+
+Mac 轻量包安装、钥匙串和 launchd 后台运行见 [Mac 终端指南](../../docs/macos-cli.md)。
 
 在你自己的终端里直接使用远端的原版 Claude Code：界面、快捷键和斜杠命令与本地 `claude` 一样，模型和会话在服务端，命令在本机当前目录执行。不需要图形界面和 Electron。
 
@@ -69,9 +71,11 @@ ccdt daemon stop         # 停止（结束它运行的全部 agent）
 ccdt daemon uninstall    # 停止并移除
 ```
 
+macOS 使用 launchd，服务路径和日志见 [Mac 终端指南](../../docs/macos-cli.md)。以下 systemd 运维命令适用于 Linux。
+
 后台服务持有这台设备到服务端的连接和执行通道，在 `$XDG_RUNTIME_DIR/ccdt.sock`（权限 0600）等待 `ccdt`。它在运行时，`ccdt` 只负责显示：按 `q` 或关掉终端，agent 照常运行；任何终端里再运行 `ccdt` 都能接回，进入时还原整屏画面。几个终端可以同时显示不同的 agent；同一个 agent 后打开的终端接管显示。
 
-- 安装前先退出正在运行的 `ccdt`：同一服务同时只接受一台执行设备。
+- 安装前先退出正在运行的 `ccdt`：同一设备身份只允许一个执行连接。
 - 后台服务启动时从密钥环读凭据；密钥环还锁着时它会失败，systemd 每 10 秒重试，解锁后自动连上。`ccdt login` 换了服务或凭据后，运行 `systemctl --user restart ccdt`。
 - Claude 在本机执行的命令继承后台服务的环境。systemd 的 PATH 不含 `~/.local/bin` 等登录 shell 才加的目录，所以安装时会记下当前终端的 PATH；PATH 变了就再运行一次 `ccdt daemon install`（会重启后台服务）。代理变量不会写进服务配置。
 - 用户服务随桌面登录启动；退出桌面会话后也要保持运行，执行 `loginctl enable-linger`。
@@ -104,7 +108,7 @@ npm run install:cli      # 在 ~/.local/bin 放一个绑定本源码目录和当
 ccdt login               # 服务地址、证书指纹默认取自桌面客户端的保存值；凭据不回显
 ```
 
-服务凭据优先存入系统密钥环（`secret-tool`，GNOME Keyring / KWallet）；密钥环不可用时存入 `~/.config/cc-desk-tunnel/cli.json`，权限 0600。也可以不保存，用 `CCDT_TOKEN` 环境变量提供。脚本化登录：`ccdt login --url wss://… --fingerprint … --token-stdin < token.txt`。
+macOS 的服务凭据存入登录钥匙串，失败时提示解锁后重试。Linux 的服务凭据优先存入系统密钥环（`secret-tool`，GNOME Keyring / KWallet）；密钥环不可用时存入 `~/.config/cc-desk-tunnel/cli.json`，权限 0600。也可以不保存，用 `CCDT_TOKEN` 环境变量提供。脚本化登录：`ccdt login --url wss://… --fingerprint … --token-stdin < token.txt`。
 
 ## 工作方式
 
@@ -112,7 +116,7 @@ ccdt login               # 服务地址、证书指纹默认取自桌面客户�
 
 - 目录到会话：按目录的真实路径匹配 `projectPath`，取最近更新的会话，与桌面客户端里同一项目的会话共用。
 - 代理：读取 `https_proxy` / `all_proxy` 与 `no_proxy`，只支持 HTTP CONNECT 代理；回环地址总是直连。
-- 同一服务同一时间只接受一台执行设备；桌面客户端已连接时会提示“已有桌面设备连接”。一个会话同时只有一个原生运行或终端。
+- 新版支持多个设备同时连接，按稳定设备身份隔离会话；旧协议独占兼容与迁移见[多设备指南](../../docs/multi-device.md)。一个会话同时只有一个原生运行或终端。
 - 终端在服务端常驻：服务端用一份屏幕模型（xterm headless）记录每个终端的画面，再次进入时先画出当前整屏，再接上实时输出。
 - 网络中断时终端暂停，窗口标题显示“正在重连”；默认 30 分钟内恢复则接着用，Claude Code 一直在服务端运行，期间的输出和按键都会补上；超过后仍不断重试，重建连接并恢复同一对话。见[断线续接](../../docs/linux-desktop.md#断线续接)。
 - 异常断开时恢复本机终端状态（光标、括号粘贴、鼠标与焦点上报、备用屏幕）。

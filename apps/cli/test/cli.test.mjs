@@ -84,7 +84,7 @@ test('token goes to the keyring when it answers, otherwise to a private file', a
     assert.equal(await clearConfig(env, secrets), true);
     assert.equal(keyring.size, 0);
 
-    assert.equal(await saveConfig(login, env, async () => null), 'file');
+    assert.equal(await saveConfig(login, env, async () => null, 'linux'), 'file');
     assert.equal((await stat(file)).mode & 0o777, 0o600);
     assert.equal((await stat(join(home, 'cc-desk-tunnel'))).mode & 0o777, 0o700);
     assert.deepEqual(await loadConfig(env, async () => null), login);

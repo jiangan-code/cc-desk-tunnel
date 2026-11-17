@@ -12,7 +12,7 @@ const MAX_BACKOFF_MS = 5000;
 // Failed connections are retried with backoff for as long as the tunnel lives: during a network drop the control
 // connection is being resumed too, and the tunnel must still be there when it is back. Only a refused secret, which
 // means the service no longer knows this tunnel, ends it.
-export function startRelay({ connectionId, secret }, port, openSocket, onFailure) {
+export function startRelay({ connectionId, secret, device }, port, openSocket, onFailure) {
   const waiting = new Set();
   // Waiting connections let go by `reset`; their close is not a failure.
   const discarded = new WeakSet();
@@ -75,7 +75,9 @@ export function startRelay({ connectionId, secret }, port, openSocket, onFailure
       stream.pipe(local);
       local.pipe(stream);
     });
-    socket.send(JSON.stringify({ type: 'tunnel.attach', connectionId, secret }));
+    socket.send(
+      JSON.stringify({ type: 'tunnel.attach', connectionId, secret, ...(device && { device }) }),
+    );
   }
   function close() {
     closed = true;

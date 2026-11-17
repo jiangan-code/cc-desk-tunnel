@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { execFile } from 'node:child_process';
-import { X509Certificate, randomUUID } from 'node:crypto';
+import { X509Certificate, randomBytes, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { connect, createServer } from 'node:net';
 import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
@@ -16,7 +16,7 @@ import { startLinuxTunnel } from '../electron/linux-tunnel.mjs';
 const execute = promisify(execFile);
 // The daemon tests must not put notifications on the desktop.
 process.env.CCDT_NOTIFY = '0';
-const linux = { skip: process.platform !== 'linux', timeout: 60000 };
+const linux = { skip: !['linux', 'darwin'].includes(process.platform), timeout: 60000 };
 
 async function certificate(directory) {
   const keyPath = join(directory, 'key.pem');
@@ -128,7 +128,11 @@ test(
       results.map((result) => result.stdout.toString()),
       ['0', '1', '2', '3', '4', '5'],
     );
-    const large = await ssh(dataDir, connectionId, 'head -c 8388608 /dev/zero | tr "\\0" a');
+    const large = await ssh(
+      dataDir,
+      connectionId,
+      'dd if=/dev/zero bs=1048576 count=8 2>/dev/null | tr "\\0" a',
+    );
     assert.equal(large.stdout.length, 8 * 1024 * 1024);
     assert.equal(
       large.stdout.every((byte) => byte === 0x61),
@@ -485,10 +489,28 @@ test(
     await chmod(executable, 0o755);
     const { url, token, fingerprint } = await service(t, { claude: { executable } });
     const socketPath = join(directory, 'ccdt.sock');
-    const daemon = await startDaemon({ url, fingerprint, token, socketPath }, () => {});
+    const daemon = await startDaemon(
+      {
+        url,
+        fingerprint,
+        token,
+        socketPath,
+        device: { id: randomUUID(), key: randomBytes(32).toString('base64url') },
+      },
+      () => {},
+    );
     t.after(() => daemon.stop());
     await assert.rejects(
-      startDaemon({ url, fingerprint, token, socketPath }, () => {}),
+      startDaemon(
+        {
+          url,
+          fingerprint,
+          token,
+          socketPath,
+          device: { id: randomUUID(), key: randomBytes(32).toString('base64url') },
+        },
+        () => {},
+      ),
       /已在运行/,
       'one daemon per socket',
     );
@@ -589,7 +611,13 @@ test(
     const network = await outage(t, url);
     const notices = [];
     const daemon = await startDaemon(
-      { url: network.url, token, fingerprint, socketPath: join(directory, 'daemon.sock') },
+      {
+        url: network.url,
+        token,
+        fingerprint,
+        socketPath: join(directory, 'daemon.sock'),
+        device: { id: randomUUID(), key: randomBytes(32).toString('base64url') },
+      },
       (text) => notices.push(text),
     );
     t.after(() => daemon.stop());

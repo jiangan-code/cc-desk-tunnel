@@ -10,7 +10,14 @@ import {
   permissionModeSchema,
 } from '@cc-desk-tunnel/protocol';
 import { controlTlsOptions, openProxyBridge } from '../../desktop/electron/proxy-bridge.mjs';
-import { clearConfig, configDirectory, desktopLogin, loadConfig, saveConfig } from './config.mjs';
+import {
+  clearConfig,
+  configDirectory,
+  devicePath,
+  desktopLogin,
+  loadConfig,
+  saveConfig,
+} from './config.mjs';
 import { openConnection } from './connection.mjs';
 import {
   daemonRunning,
@@ -21,6 +28,8 @@ import {
   stopDaemon,
   uninstallDaemon,
 } from './daemon.mjs';
+import { loadDeviceIdentity } from '../../desktop/electron/device-identity.mjs';
+import { launchLogPath } from './launchd.mjs';
 import { environmentProxy } from './environment.mjs';
 import manifest from '../package.json' with { type: 'json' };
 import { Deck } from './deck.mjs';
@@ -36,8 +45,9 @@ const USAGE = `用法：
   ccdt account-token set|clear <账号>  保存或清除账号的 OAuth 令牌（set 从标准输入读取）
   ccdt export <会话 ID> [--out <文件>]  导出原生对话记录为 tar 文件
   ccdt rm <会话 ID>…     删除已停止的 agent 和它的对话（需要后台服务）
-  ccdt daemon install    装成 systemd 用户服务：关掉终端 agent 也继续运行
+  ccdt daemon install    安装用户后台服务：关掉终端 agent 也继续运行
   ccdt daemon status | stop | uninstall
+  ccdt device            显示稳定设备 ID（不显示密钥）
   ccdt login             保存服务地址、证书指纹和服务凭据
   ccdt logout            删除保存的连接信息
   ccdt --help | --version
@@ -108,6 +118,10 @@ export async function main(argv) {
       throw new UsageError(
         '账号名只能用小写字母、数字、- 和 _，以字母或数字开头，最长 32 个字符。',
       );
+    if (positionals[0] === 'device') {
+      console.log((await loadDeviceIdentity(devicePath())).id);
+      return 0;
+    }
     if (positionals[0] === 'login') return await login(values);
     if (positionals[0] === 'logout') {
       console.log((await clearConfig()) ? '已删除保存的连接信息。' : '没有保存的连接信息。');
@@ -252,9 +266,10 @@ async function daemon(command) {
     console.log(`已安装并启动后台服务：${path}`);
     console.log('它运行的命令使用本终端此刻的 PATH；PATH 变了就再运行一次 ccdt daemon install。');
     console.log(
-      '之后运行 ccdt 会连到它；关掉终端 agent 也继续运行。日志：journalctl --user -u ccdt',
+      `之后运行 ccdt 会连到它；关掉终端 agent 也继续运行。日志：${process.platform === 'darwin' ? launchLogPath() : 'journalctl --user -u ccdt'}`,
     );
-    console.log('桌面会话退出后也要保持运行，可以执行：loginctl enable-linger');
+    if (process.platform !== 'darwin')
+      console.log('桌面会话退出后也要保持运行，可以执行：loginctl enable-linger');
     return 0;
   }
   if (command === 'uninstall') {
@@ -322,7 +337,7 @@ async function run(directory, values) {
       status(`连接 ${new URL(config.url).host} …`);
       bridge = await openProxyBridge(
         { url: config.url, fingerprint: config.fingerprint },
-        { resolveProxy: async (target) => environmentProxy(target) },
+        { devicePath: devicePath(), resolveProxy: async (target) => environmentProxy(target) },
       );
       abort.signal.throwIfAborted();
       status('建立本机执行通道 …');
@@ -469,7 +484,7 @@ async function accountConnection() {
   if (!config?.token) throw new Error('没有可用的服务配置或凭据；请先运行 ccdt login。');
   const bridge = await openProxyBridge(
     { url: config.url, fingerprint: config.fingerprint },
-    { resolveProxy: async (target) => environmentProxy(target) },
+    { devicePath: devicePath(), resolveProxy: async (target) => environmentProxy(target) },
   );
   try {
     return { connection: await openConnection(bridge.url, config.token), bridge };

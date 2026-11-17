@@ -22,6 +22,7 @@ execFileSync(
     'packages/protocol/package.json',
     'packages/protocol/src',
     'scripts/install-linux.sh',
+    'scripts/assign-device-sessions.mjs',
     'deploy',
   ],
   { windowsHide: true },

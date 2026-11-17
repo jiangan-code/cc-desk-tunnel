@@ -4,10 +4,23 @@ import { spawn } from 'node:child_process';
 export function notify(summary, body, env = process.env) {
   if (env.CCDT_NOTIFY === '0') return;
   try {
-    const child = spawn('notify-send', ['--app-name=ccdt', summary, body], {
-      stdio: 'ignore',
-      detached: true,
-    });
+    const mac = process.platform === 'darwin';
+    const child = spawn(
+      mac ? '/usr/bin/osascript' : 'notify-send',
+      mac
+        ? [
+            '-e',
+            'on run argv\n display notification (item 2 of argv) with title (item 1 of argv)\nend run',
+            '--',
+            summary,
+            body,
+          ]
+        : ['--app-name=ccdt', summary, body],
+      {
+        stdio: 'ignore',
+        detached: true,
+      },
+    );
     child.on('error', () => {});
     child.unref();
   } catch {}
