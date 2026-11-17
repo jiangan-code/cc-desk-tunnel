@@ -1,6 +1,6 @@
 # 终端多设备验证记录
 
-实现版本：0.2.6 / 协议 13。验证环境：Linux x64、Node.js 24。交付范围为 Linux/macOS ccdt 和共用连接模块；本次未操作生产 VPS。
+实现版本：0.2.6 / 协议 13。验证环境：Linux x64、Node.js 24。交付范围为 Linux/macOS ccdt 和共用连接模块。
 
 | 检查 | 结果 |
 | --- | --- |
@@ -32,3 +32,5 @@
 仓库扫描命中的原有夹具：`apps/cli/test/accounts.test.mjs`、`apps/server/test/native-profiles.test.ts`、`apps/server/test/server.test.ts`、`packages/protocol/test/protocol.test.ts`。已比较改动前后匹配内容，一致。
 
 升级顺序、历史归属分配、安全边界和回滚步骤见[多设备指南](multi-device.md)。
+
+Linux 部署验证已通过：服务与旧电脑 ccdt 均运行 0.2.6 / 协议 13，HTTPS 健康检查正常，原配置与证书保持一致；旧会话归属与原生对话 ID 保留。使用独立临时身份验证了相同地址/令牌的双执行通道并存、旧会话不可见和跨设备订阅拒绝，验证后移除临时身份。模型 API 请求数未增加。实际 Mac 终端的双机验收仍待完成。
