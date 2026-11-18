@@ -10,7 +10,7 @@
 fe503f65c6289d59c23e5b21ae44f03583f997dd33a2cbfc75ab4f96fb8fc73f
 ```
 
-运行时 `/proc/<pid>/exe` 指向这个已安装文件；没有改写 CLI、替换内部工具、注入 `NODE_OPTIONS` / `LD_PRELOAD`、补丁包或执行 MCP。代理不提供自行判断工具风险的审批策略。自动与手动模式均交给 CLI。
+运行时 `/proc/<pid>/exe` 指向这个已安装文件；没有改写 CLI、替换内部工具、注入 `NODE_OPTIONS` / `LD_PRELOAD`、补丁包或执行 MCP。配置了 Exa 时，CLI 自己按官方项目配置连接 Exa 的托管 MCP 服务器（见下文“网页搜索（Exa）”），代理本身仍不执行 MCP。代理不提供自行判断工具风险的审批策略。自动与手动模式均交给 CLI。
 
 外层采用官方 Agent SDK 0.3.286，指定 `pathToClaudeCodeExecutable`，经官方双向 stream-json / stdio 控制接口传递用户输入、公开事件、审批与取消。SDK 自身使用真实 `CLAUDE_CODE_ENTRYPOINT=sdk-ts`、版本标记与 `--permission-prompt-tool stdio`；这是原生 stdio 请求 / 回复入口，不是 MCP 工具。没有伪装成交互式终端，也没有覆盖官方标记。
 
@@ -20,13 +20,22 @@ fe503f65c6289d59c23e5b21ae44f03583f997dd33a2cbfc75ab4f96fb8fc73f
 
 登录 / 退出 / 状态由服务端驱动官方 `claude auth login / logout / status`，授权链接与回填代码经桌面端转交，凭据只由 CLI 自己读写。官方 `auth login` 不记下首次引导已完成（2.1.286 实测），交互式终端因此会让已登录账号重走主题与登录。
 
-**代理唯一直接改动 CLI 状态文件的地方**（`src/native-onboarding.ts`）：终端启动前，若官方凭据文件里已有登录而 `~/.claude.json` 缺少 `hasCompletedOnboarding`，服务端补上这一项；判断时只看凭据是否存在，不读取、不复制也不转发其内容，未登录时不动，引导照常出现。除此之外，代理对 CLI 的配置只通过官方 settings 文件、命令行参数和环境变量表达。
+**代理唯一直接改动 CLI 状态文件的地方**（`src/native-onboarding.ts`）：终端启动前，若官方凭据文件里已有登录而 `~/.claude.json` 缺少 `hasCompletedOnboarding`，服务端补上这一项；判断时只看凭据是否存在，不读取、不复制也不转发其内容，未登录时不动，引导照常出现。除此之外，代理对 CLI 的配置只通过官方 settings 文件、项目 `.mcp.json`、命令行参数和环境变量表达。
 
 多账号（见[多个 Claude 账号](multi-account.md)）用官方的 `CLAUDE_CONFIG_DIR`：每个额外账号一个配置目录，服务端只给该账号的 CLI 进程设置这个变量。新建账号时，服务端创建目录、把其中的 `projects`（以及默认目录已有的 `skills`、`agents`、`commands`、`CLAUDE.md`）软链接到默认目录、复制一份默认的 `settings.json`；不读取、不复制凭据。上面补 `hasCompletedOnboarding` 的规则对每个账号目录同样适用。
 
 每次模型调用的统计来自 CLI 自带的 OpenTelemetry 日志导出（`claude_code.api_request`）：服务在环回地址起接收端，只给自己启动的 CLI 进程设置 `CLAUDE_CODE_ENABLE_TELEMETRY` 与 `OTEL_*LOGS*` 变量，只保存模型、token、费用估算、耗时与会话 ID，不保存账号标识和内容；未开启提示词 / 回复导出。费用是 CLI 按 API 价格的估算，不是订阅账单。
 
 运行中补充复用 SDK async user input，保持同一原生进程与 session ID；human origin 不把用户补充伪装成工具输出或系统提醒。原生可在工具间采纳或合并输入，回执通过消息 UUID 同步；代理不开发独立调度 / 记忆。输入收尾、断连 / 取消及重启按实际确认程度记录，无自动重放。
+
+## 网页搜索（Exa）
+
+服务环境有 `EXA_API_KEY` 时（Docker 部署用 `manage.sh exa-key` 写入 `config/service.env`），代理在准备每个会话的原生工作目录时（图形运行和原生终端都经过这一步）：
+
+- 在 `.mcp.json` 里加 `exa`：Exa 官方托管 MCP 服务器 `https://mcp.exa.ai/mcp`（HTTP），请求头 `x-api-key` 写成 `${EXA_API_KEY}`，由 CLI 启动时从自己的环境展开；key 不写进文件、命令行或日志。
+- 在 `.claude/settings.local.json` 里用 `enabledMcpjsonServers` 预先启用 `exa`，并在 `permissions.deny` 加 `WebSearch`。
+
+于是所有账号的新进程都只能用 `mcp__exa__web_search_exa` 等 Exa 工具搜索，内置 WebSearch 不出现在工具列表里；WebFetch 不受影响。`EXA_API_KEY` 不在服务专用变量之列，会留在 CLI 继承的环境里，CLI 的 shell 也能读到。去掉 key 后，下次准备目录时这三处 `exa` / `WebSearch` 条目被移除，用户在这些文件里的其他内容保持不变。已经在运行的进程保持启动时的工具。
 
 ## 上下文的权威
 

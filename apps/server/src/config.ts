@@ -81,6 +81,8 @@ export function environmentConfig(env: NodeJS.ProcessEnv, defaultDataDir: string
           settingsPath: env.CLAUDE_SETTINGS_PATH,
           contextRetentionDays: retention,
           trustedHookProjects,
+          // Left in the environment: the native CLI expands it into the Exa MCP server's request header.
+          exaSearch: !!env.EXA_API_KEY,
         }
       : undefined,
   };

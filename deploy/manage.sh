@@ -17,6 +17,7 @@ Usage:
   manage.sh client INSTALLER_EXE              offer a Windows installer to connected clients
   manage.sh token [SECRET]                    replace the service token (random when omitted) and restart
   manage.sh release-token [FILE]              save a read-only GitHub token for following releases (none: remove)
+  manage.sh exa-key [FILE]                    save the Exa API key that replaces built-in web search (none: remove)
   manage.sh backup ABSOLUTE_ARCHIVE_PATH
   manage.sh restore ABSOLUTE_ARCHIVE_PATH
   manage.sh certificate FULLCHAIN PRIVATE_KEY
@@ -293,6 +294,26 @@ case "$command" in
     mv -- "$temp" "$DATA_DIR/config/service.env"
     if running; then dc restart; wait_healthy; fi
     echo "Release token $([[ -n "$RELEASE_TOKEN" ]] && echo saved || echo removed)."
+    ;;
+  exa-key)
+    # Native Claude Code searches the web through Exa while the key is set; without an argument it is removed.
+    [[ $# -le 1 ]] || fail "Specify at most one key file."
+    EXA_KEY=""
+    if [[ $# = 1 ]]; then
+      [[ -f "$1" ]] || fail "Specify the file holding the key."
+      EXA_KEY="$(tr -d '[:space:]' < "$1")"
+      [[ "$EXA_KEY" =~ ^[A-Za-z0-9_-]{16,255}$ ]] || fail "That file does not hold an Exa API key."
+    fi
+    temp="$(mktemp "$DATA_DIR/config/service.env.XXXXXX")"
+    {
+      grep -v '^EXA_API_KEY=' "$DATA_DIR/config/service.env" || true
+      [[ -z "$EXA_KEY" ]] || write_var EXA_API_KEY "$EXA_KEY"
+    } > "$temp"
+    chmod 600 "$temp"
+    [[ "$(id -u)" != 0 ]] || chown 1000:1000 "$temp"
+    mv -- "$temp" "$DATA_DIR/config/service.env"
+    if running; then dc restart; wait_healthy; fi
+    echo "Exa API key $([[ -n "$EXA_KEY" ]] && echo saved || echo removed)."
     ;;
   uninstall) dc down --remove-orphans; echo "Removed containers/network. Data and config retained: $DATA_DIR" ;;
   connection)

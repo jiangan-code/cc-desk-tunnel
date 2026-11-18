@@ -105,6 +105,12 @@ frp 使用独立私有证书及每连接随机 token，经已验证的 WSS 下�
 
 `config/provider.json` 是官方 Claude settings 结构，初始 `{}`；API 环境配置可写入 `env` 中的 `ANTHROPIC_BASE_URL`、`ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_MODEL`，使用提供方正式支持的接口。不要将 key 放进命令行、Git 或截图。使用订阅登录还是 API key，以及是否符合提供方条款，由使用者自行确认。
 
+原生 Claude Code 的网页搜索可以改用 [Exa](https://exa.ai/docs/reference/exa-mcp)：把 Exa API key 存成 VPS 上的一个文件（0600），执行下面的命令后删除该文件。key 保存在 `config/service.env`（0600）的 `EXA_API_KEY`，命令会重启服务；之后新启动的 Claude Code 进程（所有账号）用 Exa 的 MCP 搜索工具，内置 WebSearch 被禁用，WebFetch 不受影响。详见[原生运行](../docs/native-runtime.md#网页搜索exa)。
+
+```sh
+sudo bash deploy/manage.sh exa-key /path/exa-key.txt   # 不带参数则移除，恢复内置 WebSearch
+```
+
 持久数据位于指定 `--data`：
 
 - `home/`：原生 Claude 账号 / 配置 / 上下文、用户安装工具及缓存。
